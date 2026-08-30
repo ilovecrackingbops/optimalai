@@ -109,7 +109,7 @@ export default function HealthScreen() {
 
       <Text style={[styles.heading, { color: theme.text }]}>Connect to Apple Health</Text>
       <Text style={[type.body, { color: theme.textMuted, marginTop: space.md }]}>
-        Sync your daily activity between Nut AI and the Health app so your calorie target reflects
+        Sync your daily activity between Optimal AI and the Health app so your calorie target reflects
         what you actually did.
       </Text>
 

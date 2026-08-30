@@ -22,13 +22,13 @@ export interface ManualFoodSelection {
   displayName: string
   grams: number
   nutrientSnapshot: NutrientRow100g
+  isWholeFood: boolean | null
+  isAnimalBased: boolean | null
 }
 
 export async function logManualFood(h: DbAdapter, selection: ManualFoodSelection, now: number): Promise<number> {
   const date = localDate(now)
-  const scale = selection.grams / 100
   const n = selection.nutrientSnapshot
-  const scaled = (v: number | null | undefined) => (v == null ? null : v * scale)
 
   return h.transaction(async (tx) => {
     const meal = await tx.run(
@@ -42,8 +42,9 @@ export async function logManualFood(h: DbAdapter, selection: ManualFoodSelection
       `INSERT INTO log_items (meal_id, matched_food_id, matched_food_source, display_name, grams,
                               gram_pathway, portion_source, snap_energy_kcal, snap_protein_g, snap_fat_g,
                               snap_carb_g, snap_fiber_g, snap_sugar_g, snap_sodium_mg,
+                              is_whole_food, is_animal_based,
                               is_estimate, macros_user_edited, sort_order, logged_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?)`,
       [
         mealId,
         selection.foodId,
@@ -52,13 +53,24 @@ export async function logManualFood(h: DbAdapter, selection: ManualFoodSelection
         selection.grams,
         'fndds_standard_portion',
         'db_search',
-        scaled(n.kcal),
-        scaled(n.protein_g),
-        scaled(n.fat_g),
-        scaled(n.carbs_g),
-        scaled(n.fiber_g),
-        scaled(n.sugar_g),
-        scaled(n.sodium_mg),
+        // Per-100 g, unscaled — every reader (dayTotals, mealDetail, ...)
+        // multiplies snap_* by grams/100 itself. Pre-scaling here was double-
+        // applying that factor: a 28 g default portion got stored as its
+        // ALREADY-scaled ~77 kcal, and dayTotals then scaled it AGAIN by
+        // 28/100. Editing the grams afterward (a very natural "actually I
+        // want 100 g" correction) made it worse, not better — the stale
+        // pre-scaled number just got multiplied by the new gram figure
+        // instead of the true per-100g rate, which is the exact "100 g of
+        // bread came out to 79 kcal" bug this fixes.
+        n.kcal,
+        n.protein_g,
+        n.fat_g,
+        n.carbs_g,
+        n.fiber_g ?? null,
+        n.sugar_g ?? null,
+        n.sodium_mg ?? null,
+        selection.isWholeFood == null ? null : selection.isWholeFood ? 1 : 0,
+        selection.isAnimalBased == null ? null : selection.isAnimalBased ? 1 : 0,
         now,
       ],
     )

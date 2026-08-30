@@ -37,7 +37,7 @@ import { radius, space, type } from '../../src/theme/tokens'
  *   - "Trusted by millions: 10M+ users, 4.8 stars". We have no users. Inventing
  *     social proof is fabricating a record, and a rating counter on a plan screen
  *     is a conversion device, not information.
- *   - The "Without Nut AI ❌ / With Nut AI ✅" comparison. It is an ad, placed
+ *   - The "Without Optimal AI ❌ / With Optimal AI ✅" comparison. It is an ad, placed
  *     where a person is looking at their own body data.
  *
  * ADDED: the arithmetic. The reference shows 3826 kcal with no way to see where
@@ -229,7 +229,7 @@ export default function PlanScreen() {
         </View>
 
         <Text style={[type.caption, { color: theme.textFaint, marginTop: space.xl, lineHeight: 19 }]}>
-          These are estimates from population equations, not measurements of you. Nut AI is not a
+          These are estimates from population equations, not measurements of you. Optimal AI is not a
           medical device. Adjust anything that does not fit, and talk to a dietitian or doctor
           before making medical decisions.
         </Text>

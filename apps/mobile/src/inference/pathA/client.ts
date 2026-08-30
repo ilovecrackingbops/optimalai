@@ -4,11 +4,14 @@ import {
   buildExerciseEstimateInstruction,
   buildLabelScanRequest,
   buildOpenAIRequest,
+  buildPhysiqueEstimateRequest,
   buildReceiptScanRequest,
+  buildTextFoodLogInstruction,
   buildTextJsonRequest,
   buildWebLookupRequest,
   computeScanCost,
   EXERCISE_ESTIMATE_PROMPT_VERSION,
+  TEXT_FOOD_LOG_PROMPT_VERSION,
   type ProviderId,
 } from '@nutai/prompt'
 
@@ -263,6 +266,43 @@ export async function runExerciseEstimate(
     { model: input.model, instruction: buildExerciseEstimateInstruction(input.description, input.weightKg) },
     credential,
     EXERCISE_ESTIMATE_PROMPT_VERSION,
+  )
+  return postVisionJson(provider, built, fetchImpl, timeoutMs)
+}
+
+/**
+ * Visual body-fat estimate: one image in, one PhysiqueEstimate-shaped JSON out.
+ * Same transport as the label scanner, different instruction and validator.
+ */
+export async function runPhysiqueEstimate(
+  provider: ProviderId,
+  input: { model: string; imageBase64: string },
+  credential: Credential,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<WebLookupOutcome> {
+  return postVisionJson(provider, buildPhysiqueEstimateRequest(provider, input, credential), fetchImpl, timeoutMs)
+}
+
+/**
+ * Text-only food logging — no photo. Produces the SAME VisionPayload JSON shape
+ * a photo scan does, so the caller can run it through the identical downstream
+ * pipeline (gram-engine, resolver, confidence bands). A meal description can run
+ * several items long, so this gets a larger token budget than the other
+ * text-only call (exercise estimates).
+ */
+export async function runTextFoodScan(
+  provider: ProviderId,
+  input: { model: string; description: string },
+  credential: Credential,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<WebLookupOutcome> {
+  const built = buildTextJsonRequest(
+    provider,
+    { model: input.model, instruction: buildTextFoodLogInstruction(input.description), maxTokens: 2048 },
+    credential,
+    TEXT_FOOD_LOG_PROMPT_VERSION,
   )
   return postVisionJson(provider, built, fetchImpl, timeoutMs)
 }

@@ -2,7 +2,7 @@ import { router } from 'expo-router'
 import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { bmi, UNDERWEIGHT_BMI } from '@nutai/goals'
 import { OnboardingScreen } from '../../src/components/onboarding/Chrome'
-import { EditableValue, RulerPicker } from '../../src/components/onboarding/Controls'
+import { EditableValue, RulerPicker, Segmented } from '../../src/components/onboarding/Controls'
 import { nextRoute, stepIndex, TOTAL_STEPS } from '../../src/onboarding/flow'
 import { inferredGoal, kgToLb, lbToKg, MAINTAIN_THRESHOLD_LB, setAnswer, useAnswers } from '../../src/onboarding/store'
 import { useTheme } from '../../src/theme/ThemeProvider'
@@ -48,14 +48,28 @@ export default function DesiredWeightScreen() {
       }}
     >
       <View style={{ alignItems: 'center', marginTop: 72 }}>
-        <EditableValue
-          label={GOAL_LABEL[goal]}
-          value={shown}
-          unit={imperial ? 'lbs' : 'kg'}
-          min={min}
-          max={max}
-          onCommit={(v) => setAnswer('desiredWeightKg', imperial ? lbToKg(v) : v)}
+        <Segmented
+          options={[
+            { value: 'imperial', label: 'lbs' },
+            { value: 'metric', label: 'kg' },
+          ]}
+          value={a.units}
+          // Switching units here converts rather than resetting, same rule as
+          // the current-weight screen — changing your mind about units should
+          // never cost you the number you already dialed in.
+          onChange={(u) => setAnswer('units', u)}
         />
+
+        <View style={{ marginTop: space.lg }}>
+          <EditableValue
+            label={GOAL_LABEL[goal]}
+            value={shown}
+            unit={imperial ? 'lbs' : 'kg'}
+            min={min}
+            max={max}
+            onCommit={(v) => setAnswer('desiredWeightKg', imperial ? lbToKg(v) : v)}
+          />
+        </View>
       </View>
 
       <View style={{ marginTop: space.lg, marginHorizontal: -space.lg }}>

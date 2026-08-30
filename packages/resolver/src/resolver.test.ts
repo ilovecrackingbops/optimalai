@@ -156,6 +156,40 @@ describe('scoring', () => {
     )[0]!
     expect(bad.score).toBeLessThan(good.score)
   })
+
+  it('ranks whole egg above egg yolk for a plain "egg, raw" query, even when every other tied signal would clamp to the same ceiling', () => {
+    const eggCtx: ScoringContext = {
+      canonicalFoodKey: 'egg, raw', observedBrand: null, prepFacet: 'raw', modelCategory: null, estimatedGrams: 200,
+    }
+    const shared = { category: 'Dairy and Egg Products', prepFacet: null, servingSizeG: 50, popularityRank: 1000 }
+    const scored = scoreCandidates(
+      [
+        cand({ foodId: 'whole', name: 'Egg, whole, raw, fresh', ...shared, rawBm25: -7.4 }),
+        // Yolk is MORE popular (lower rank) than whole, which is what let it win
+        // the old tie-break — this must not be enough to beat it now.
+        cand({ foodId: 'yolk', name: 'Egg, yolk, raw, fresh', ...shared, popularityRank: 900, rawBm25: -7.4 }),
+      ],
+      eggCtx,
+    )
+    expect(scored[0]?.foodId).toBe('whole')
+    expect(scored[0]!.score - scored[1]!.score).toBeGreaterThanOrEqual(AUTO_ACCEPT.minGap)
+  })
+
+  it('does not penalize egg yolk when the query actually asks for yolk', () => {
+    const scored = scoreCandidates(
+      [cand({ foodId: 'yolk', name: 'Egg, yolk, raw, fresh', category: 'Dairy and Egg Products' })],
+      { canonicalFoodKey: 'egg yolk, raw', observedBrand: null, prepFacet: 'raw', modelCategory: null, estimatedGrams: 20 },
+    )
+    expect(scored[0]!.breakdown['eggPartPenalty']).toBe(0)
+  })
+
+  it('does not treat unrelated "white" or "yolk" words as an egg-part match', () => {
+    const scored = scoreCandidates(
+      [cand({ foodId: 'rice', name: 'Rice, white, long-grain, regular, cooked', category: null })],
+      { canonicalFoodKey: 'rice', observedBrand: null, prepFacet: null, modelCategory: null, estimatedGrams: 150 },
+    )
+    expect(scored[0]!.breakdown['eggPartPenalty']).toBe(0)
+  })
 })
 
 describe('the two-part auto-accept rule', () => {
@@ -290,5 +324,68 @@ describe('resolution against a real corpus', () => {
       })
       expect(r).toBeDefined()
     }
+  })
+
+  it('resolves a plain "eggs" log to the whole egg, not the yolk, even though the yolk row is more popular', async () => {
+    // Regression for a real user report: "4 raw eggs" logged as 644 kcal for
+    // 200 g, which is egg YOLK's 322 kcal/100 g, not whole egg's 143. Every
+    // other scoring signal ties whole/yolk/white on a bare "egg raw" query
+    // (identical bm25, identical category, identical raw-preference), so
+    // without this fix the tie broke on popularityPrior — and the yolk row
+    // legitimately IS logged more often than the whole-egg row in the real
+    // corpus, so it must not win here on that basis alone.
+    const eggs: Array<[number, string, number, number]> = [
+      [101, 'Egg, whole, raw, fresh', 143, 1064],
+      [102, 'Egg, yolk, raw, fresh', 322, 991],
+      [103, 'Egg, white, raw, fresh', 52, 1063],
+    ]
+    for (const [id, name, kcal, rank] of eggs) {
+      await db.run(
+        `INSERT INTO foods (id, source, name, category, energy_kcal, popularity_rank,
+                            license, basis_confidence, completeness_score)
+         VALUES (?,'fdc_sr_legacy',?,'Dairy and Egg Products',?,?,'CC0','high',1.0)`,
+        [id, name, kcal, rank],
+      )
+      await db.run('INSERT INTO food_fts (rowid, name, brand, synonyms) VALUES (?,?,?,?)', [
+        id, name, '', '',
+      ])
+    }
+
+    const r = await resolveByText(db, {
+      canonicalFoodKey: 'egg, raw',
+      observedBrand: null, prepFacet: 'raw', modelCategory: null, estimatedGrams: 200,
+    })
+
+    expect(r.outcome.kind).toBe('auto_accept')
+    if (r.outcome.kind === 'auto_accept') {
+      expect(String(r.outcome.match.foodId)).toBe('101')
+      expect(r.outcome.match.energyKcal).toBe(143)
+    }
+  })
+
+  it('still resolves to egg yolk when the query actually asks for it', async () => {
+    const eggs: Array<[number, string, number, number]> = [
+      [101, 'Egg, whole, raw, fresh', 143, 1064],
+      [102, 'Egg, yolk, raw, fresh', 322, 991],
+    ]
+    for (const [id, name, kcal, rank] of eggs) {
+      await db.run(
+        `INSERT INTO foods (id, source, name, category, energy_kcal, popularity_rank,
+                            license, basis_confidence, completeness_score)
+         VALUES (?,'fdc_sr_legacy',?,'Dairy and Egg Products',?,?,'CC0','high',1.0)`,
+        [id, name, kcal, rank],
+      )
+      await db.run('INSERT INTO food_fts (rowid, name, brand, synonyms) VALUES (?,?,?,?)', [
+        id, name, '', '',
+      ])
+    }
+
+    const r = await resolveByText(db, {
+      canonicalFoodKey: 'egg yolk, raw',
+      observedBrand: null, prepFacet: 'raw', modelCategory: null, estimatedGrams: 20,
+    })
+
+    expect(r.outcome.kind).toBe('auto_accept')
+    if (r.outcome.kind === 'auto_accept') expect(String(r.outcome.match.foodId)).toBe('102')
   })
 })

@@ -8,6 +8,7 @@ import {
   computeTrend,
   isDayCompleteEnough,
   katchMcArdle,
+  KCAL_PER_LB,
   mifflinStJeor,
   safeFloor,
   TARGET_CHANGE_THRESHOLD_KCAL,
@@ -113,6 +114,21 @@ describe('TDEE', () => {
     const lose = computeCalorieTarget({ ...body, activity: 'moderate', goal: 'lose', rateLbPerWeek: 1 })
     const gain = computeCalorieTarget({ ...body, activity: 'moderate', goal: 'gain', rateLbPerWeek: 1 })
     expect(gain.targetRaw - lose.tdee).toBeCloseTo(lose.tdee - lose.targetRaw, 6)
+  })
+
+  it('the four pace presets the target-weight screen offers each imply a distinct, correct daily delta', () => {
+    // Locks in KCAL_PER_LB / 7 arithmetic against the exact presets the UI
+    // hard-codes (0.3 / 0.5 / 0.625 / 1 lb/week) — a change to either side
+    // silently going out of sync is exactly the bug this guards against.
+    const presets = [0.3, 0.5, 0.625, 1] as const
+    const deltas = presets.map(
+      (rate) => computeCalorieTarget({ ...body, activity: 'moderate', goal: 'lose', rateLbPerWeek: rate }).dailyDelta,
+    )
+    for (const [i, rate] of presets.entries()) {
+      expect(deltas[i]).toBeCloseTo((rate * KCAL_PER_LB) / 7, 6)
+    }
+    // Strictly increasing: a faster pace must never imply a smaller gap.
+    for (let i = 1; i < deltas.length; i++) expect(deltas[i]!).toBeGreaterThan(deltas[i - 1]!)
   })
 })
 

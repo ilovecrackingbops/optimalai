@@ -1,4 +1,6 @@
 import { Platform } from 'react-native'
+import { summarizeLastSleepSession } from './sleep-analysis'
+import { humanizeWorkoutActivity } from './workout-activity'
 
 /**
  * HealthKit.
@@ -20,11 +22,33 @@ import { Platform } from 'react-native'
 
 export type HealthAvailability = 'available' | 'unavailable' | 'not-ios'
 
+export interface HealthWorkout {
+  id: string
+  /** Humanized from HealthKit's own activity type, e.g. "Running", "Functional Strength Training". */
+  name: string
+  startedAt: number
+  durationMin: number
+  /** Null when the source (rare, but some manual entries) never recorded energy. */
+  kcal: number | null
+}
+
 export interface HealthReadout {
   /** Steps today. Null means "we got nothing", which may mean no permission. */
   stepsToday: number | null
   activeEnergyToday: number | null
   latestWeightKg: number | null
+  /** Last night's total time asleep, in hours. Null means no sleep data found. */
+  sleepHoursLastNight: number | null
+  /**
+   * 0-100, arithmetic from last night's own samples — NOT a clinical sleep
+   * score. Duration against an 8-hour target, adjusted down for a rough
+   * awake-while-in-bed ratio when that is measurable. Same honesty rule as
+   * @nutai/totals's healthScore: shown only when there is real data to derive
+   * it from, never a guess dressed up as a number.
+   */
+  sleepScore: number | null
+  /** Average breaths per minute over today's samples, if any were recorded. */
+  respiratoryRate: number | null
   /** True only if at least one query returned data — the closest thing to proof. */
   anyDataReturned: boolean
 }
@@ -34,6 +58,8 @@ const READ_TYPES = [
   'HKQuantityTypeIdentifierStepCount',
   'HKQuantityTypeIdentifierActiveEnergyBurned',
   'HKQuantityTypeIdentifierBodyMass',
+  'HKQuantityTypeIdentifierRespiratoryRate',
+  'HKCategoryTypeIdentifierSleepAnalysis',
   'HKWorkoutTypeIdentifier',
 ] as const
 
@@ -122,11 +148,20 @@ export async function requestPermissions(): Promise<AuthResult> {
  * Written to degrade rather than throw: a denied read and an empty day are
  * indistinguishable here, and both must produce a usable app.
  */
+/**
+ * Only the "asleep" variants count toward duration — `inBed` and `awake` are
+ * time in bed NOT asleep, and folding them in would inflate the number past
+ * what anyone actually experienced as sleep.
+ */
+
 export async function readToday(now: number): Promise<HealthReadout> {
   const empty: HealthReadout = {
     stepsToday: null,
     activeEnergyToday: null,
     latestWeightKg: null,
+    sleepHoursLastNight: null,
+    sleepScore: null,
+    respiratoryRate: null,
     anyDataReturned: false,
   }
 
@@ -141,8 +176,14 @@ export async function readToday(now: number): Promise<HealthReadout> {
 
   const sum = async (identifier: string): Promise<number | null> => {
     try {
+      // The library's real DateFilter shape is { startDate, endDate } — NOT
+      // { from, to }. Every query below used to pass { from, to }, which the
+      // native Nitro binding silently read as an empty date filter, so this
+      // was fetching either nothing or every sample ever recorded rather than
+      // "today"'s. That was the whole "steps not updating" bug.
       const samples = await hk.queryQuantitySamples(identifier as never, {
-        filter: { date: { from: start, to: end } },
+        filter: { date: { startDate: start, endDate: end } },
+        limit: 0,
       } as never)
       if (!Array.isArray(samples) || samples.length === 0) return null
       return samples.reduce((acc: number, s: { quantity?: number }) => acc + (s.quantity ?? 0), 0)
@@ -165,10 +206,97 @@ export async function readToday(now: number): Promise<HealthReadout> {
     out.latestWeightKg = null
   }
 
+  try {
+    const samples = await hk.queryQuantitySamples('HKQuantityTypeIdentifierRespiratoryRate' as never, {
+      filter: { date: { startDate: start, endDate: end } },
+      limit: 0,
+    } as never)
+    if (Array.isArray(samples) && samples.length > 0) {
+      const total = samples.reduce((acc: number, s: { quantity?: number }) => acc + (s.quantity ?? 0), 0)
+      out.respiratoryRate = total / samples.length
+    }
+  } catch {
+    out.respiratoryRate = null
+  }
+
+  // Pull the newest sleep samples directly — no date filter to get wrong —
+  // and let `summarizeLastSleepSession` find "last night" from a gap in the
+  // data itself. Same reasoning as `latestWeightKg` above: newest-first with
+  // no calendar-window guess is more robust than computing a start/end and
+  // hoping last night falls inside it.
+  try {
+    const samples = await hk.queryCategorySamples('HKCategoryTypeIdentifierSleepAnalysis' as never, {
+      limit: 200,
+      ascending: false,
+    } as never)
+    if (Array.isArray(samples)) {
+      const parsed = (samples as Array<{ value: number | string; startDate: Date | string; endDate: Date | string }>).map(
+        (s) => ({ value: s.value, start: new Date(s.startDate).getTime(), end: new Date(s.endDate).getTime() }),
+      )
+      const summary = summarizeLastSleepSession(parsed)
+      out.sleepHoursLastNight = summary.sleepHours
+      out.sleepScore = summary.sleepScore
+    }
+  } catch (e) {
+    // A thrown error here used to be indistinguishable from "no permission,
+    // no data" — both produced the same silent null. If sleep data genuinely
+    // exists in Health and this still comes back empty, this line is the one
+    // place that can tell the two apart (check Metro/Xcode logs).
+    if (__DEV__) console.warn('[health] sleep query failed:', e)
+    out.sleepHoursLastNight = null
+    out.sleepScore = null
+  }
+
   out.anyDataReturned =
-    out.stepsToday != null || out.activeEnergyToday != null || out.latestWeightKg != null
+    out.stepsToday != null ||
+    out.activeEnergyToday != null ||
+    out.latestWeightKg != null ||
+    out.sleepHoursLastNight != null ||
+    out.respiratoryRate != null
 
   return out
+}
+
+/**
+ * Today's Apple Health workouts — a run tracked by an Apple Watch, a class
+ * logged in Fitness, anything HealthKit has under HKWorkoutTypeIdentifier.
+ * Purely informational: their energy is already folded into
+ * `activeEnergyToday`, so nothing here should ever be added to a calorie
+ * total a second time.
+ */
+export async function readTodayWorkouts(now: number): Promise<HealthWorkout[]> {
+  const hk = await load()
+  if (!hk) return []
+
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(now)
+
+  try {
+    const workouts = await hk.queryWorkoutSamples({
+      filter: { date: { startDate: start, endDate: end } },
+      limit: 0,
+    } as never)
+    if (!Array.isArray(workouts)) return []
+    return workouts.map((w) => {
+      const sample = w as unknown as {
+        uuid: string
+        startDate: Date | string
+        workoutActivityType: unknown
+        duration?: { quantity?: number }
+        totalEnergyBurned?: { quantity?: number }
+      }
+      return {
+        id: sample.uuid,
+        name: humanizeWorkoutActivity(sample.workoutActivityType),
+        startedAt: new Date(sample.startDate).getTime(),
+        durationMin: (sample.duration?.quantity ?? 0) / 60,
+        kcal: sample.totalEnergyBurned?.quantity ?? null,
+      }
+    })
+  } catch {
+    return []
+  }
 }
 
 /**

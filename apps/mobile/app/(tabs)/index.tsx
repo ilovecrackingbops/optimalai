@@ -1,3 +1,4 @@
+import { Image } from 'expo-image'
 import { router, useFocusEffect } from 'expo-router'
 import { useCallback, useMemo, useState } from 'react'
 import {
@@ -12,18 +13,47 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Svg, { Circle } from 'react-native-svg'
+import { healthScore } from '@nutai/totals'
 import { Icon, type IconName } from '../../src/components/Icon'
+import { stepsFallbackKcal } from '../../src/exercise/met'
+import { formatWeightKg, getUnitPref, type UnitPref } from '../../src/data/units'
+import { nutrientHighlights, type NutrientHighlight } from '../../src/data/micronutrients'
+import { openNutritionDb } from '../../src/db/expo-adapter'
 import {
   currentGoal,
   dayTotals,
+  db,
+  deleteExerciseEntry,
+  exerciseEntries,
+  exerciseTotals,
   localDate,
+  logWater,
+  mealsForDate,
   runAdaptive,
+  setting,
+  undoLastWater,
+  waterTotal,
+  weightHistory,
   type AdaptiveOutcome,
   type CurrentGoal,
   type DayTotals,
+  type ExerciseListEntry,
+  type MealListEntry,
 } from '../../src/data/repo'
+import {
+  availability,
+  readToday,
+  readTodayWorkouts,
+  type HealthAvailability,
+  type HealthReadout,
+  type HealthWorkout,
+} from '../../src/health/healthkit'
 import { useTheme } from '../../src/theme/ThemeProvider'
-import { radius, space, type } from '../../src/theme/tokens'
+import { MIN_TAP_TARGET, radius, space, type } from '../../src/theme/tokens'
+
+const DEFAULT_STEPS_GOAL = 10_000
+const ML_PER_FL_OZ = 29.5735
+const WATER_QUICK_ADD_ML = 8 * ML_PER_FL_OZ
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -51,27 +81,81 @@ export default function Home() {
   const [adaptive, setAdaptive] = useState<AdaptiveOutcome | null>(null)
   const [offset, setOffset] = useState(0)
   const [page, setPage] = useState(0)
+  const [exercise, setExercise] = useState<{ kcal: number; count: number }>({ kcal: 0, count: 0 })
+  const [exerciseList, setExerciseList] = useState<ExerciseListEntry[]>([])
+  const [healthWorkouts, setHealthWorkouts] = useState<HealthWorkout[]>([])
+  const [health, setHealth] = useState<HealthReadout | null>(null)
+  const [healthAvail, setHealthAvail] = useState<HealthAvailability>('unavailable')
+  const [meals, setMeals] = useState<MealListEntry[]>([])
+  const [latestWeightKg, setLatestWeightKg] = useState<number | null>(null)
+  const [weightLoggedToday, setWeightLoggedToday] = useState(false)
+  const [waterMl, setWaterMl] = useState(0)
+  const [unitPref, setUnitPref] = useState<UnitPref>('imperial')
+  const [micros, setMicros] = useState<NutrientHighlight[]>([])
+  const [stepGoal, setStepGoal] = useState(DEFAULT_STEPS_GOAL)
 
   const selected = useMemo(() => Date.now() + offset * 86_400_000, [offset])
 
-  useFocusEffect(
-    useCallback(() => {
-      let alive = true
-      void (async () => {
-        // The adaptive loop runs BEFORE reading the goal, so a target it just
-        // changed is the one rendered. Its own gates decide whether it may act.
-        const outcome = await runAdaptive(Date.now())
-        const [g, t] = await Promise.all([currentGoal(), dayTotals(localDate(selected))])
-        if (!alive) return
-        setAdaptive(outcome)
-        setGoal(g)
-        setTotals(t)
-      })()
-      return () => {
-        alive = false
-      }
-    }, [selected]),
-  )
+  const reload = useCallback(() => {
+    let alive = true
+    void (async () => {
+      // The adaptive loop runs BEFORE reading the goal, so a target it just
+      // changed is the one rendered. Its own gates decide whether it may act.
+      const outcome = await runAdaptive(Date.now())
+      const date = localDate(selected)
+      const [g, t, ex, exList, ml, avail, hk, hkWorkouts, weights, water, units, stepGoalStr] = await Promise.all([
+        currentGoal(),
+        dayTotals(date),
+        exerciseTotals(date),
+        exerciseEntries(date),
+        mealsForDate(date),
+        availability(),
+        readToday(selected),
+        readTodayWorkouts(selected),
+        weightHistory(),
+        waterTotal(date),
+        getUnitPref(),
+        setting('stepGoal', String(DEFAULT_STEPS_GOAL)),
+      ])
+      if (!alive) return
+      setAdaptive(outcome)
+      setGoal(g)
+      setTotals(t)
+      setStepGoal(Number(stepGoalStr) || DEFAULT_STEPS_GOAL)
+      setExercise(ex)
+      setExerciseList(exList)
+      setHealthWorkouts(hkWorkouts)
+      setMeals(ml)
+      setHealthAvail(avail)
+      setHealth(hk)
+      setLatestWeightKg(weights[weights.length - 1]?.weightKg ?? hk.latestWeightKg)
+      setWaterMl(water)
+      setUnitPref(units)
+
+      const [userDb, nutritionDb] = await Promise.all([db(), openNutritionDb()])
+      const highlights = await nutrientHighlights(userDb, nutritionDb, date)
+      if (alive) setMicros(highlights)
+
+      const todayDay = Math.floor(Date.parse(`${localDate(Date.now())}T00:00:00Z`) / 86_400_000)
+      setWeightLoggedToday(weights[weights.length - 1]?.day === todayDay)
+    })()
+    return () => {
+      alive = false
+    }
+  }, [selected])
+
+  useFocusEffect(reload)
+
+  const date = localDate(selected)
+  function addWater() {
+    setWaterMl((v) => v + WATER_QUICK_ADD_ML)
+    void logWater(WATER_QUICK_ADD_ML, Date.now())
+  }
+  function removeWater() {
+    if (waterMl <= 0) return
+    setWaterMl((v) => Math.max(0, v - WATER_QUICK_ADD_ML))
+    void undoLastWater(date)
+  }
 
   if (!goal || !totals) {
     return (
@@ -81,10 +165,27 @@ export default function Home() {
     )
   }
 
-  const remaining = goal.targetKcal - totals.kcal
+  // Active Energy from HealthKit is the trusted number when it exists; the
+  // steps-based estimate is a fallback for phones with no paired Watch, never
+  // added on top of a real Active Energy sample.
+  const healthKcal =
+    health?.activeEnergyToday ??
+    (health?.stepsToday != null ? stepsFallbackKcal(health.stepsToday, latestWeightKg ?? 70) : 0)
+  const burnedKcal = exercise.kcal + healthKcal
+
+  const remaining = goal.targetKcal - totals.kcal + burnedKcal
   const over = remaining < 0
-  const pct = goal.targetKcal > 0 ? totals.kcal / goal.targetKcal : 0
-  const empty = totals.mealCount === 0 && totals.pendingCount === 0
+  const pct = goal.targetKcal > 0 ? Math.max(0, (totals.kcal - burnedKcal) / goal.targetKcal) : 0
+  const empty = totals.mealCount === 0 && totals.pendingCount === 0 && meals.length === 0
+  const hs = healthScore(
+    { kcal: totals.kcal, protein_g: totals.protein_g, fat_g: totals.fat_g, carbs_g: totals.carbs_g, fiber_g: totals.fiber_g, sugar_g: totals.sugar_g, sodium_mg: totals.sodium_mg },
+    totals.grams > 0 ? totals.grams : undefined,
+    {
+      wholeFoodShare: totals.classifiedKcal > 0 ? totals.wholeFoodKcal / totals.classifiedKcal : null,
+      animalBasedShare: totals.classifiedKcal > 0 ? totals.animalBasedKcal / totals.classifiedKcal : null,
+    },
+  )
+  const waterFlOz = waterMl / ML_PER_FL_OZ
   return (
     <ScrollView
       style={{ backgroundColor: theme.bg }}
@@ -93,7 +194,7 @@ export default function Home() {
     >
       {/* Header */}
       <View style={styles.header}>
-        <Text style={[styles.wordmark, { color: theme.text }]}>Nut AI</Text>
+        <Text style={[styles.wordmark, { color: theme.text }]}>Optimal AI</Text>
         <View style={[styles.streakPill, { backgroundColor: theme.bgSunken }]}>
           <Icon name="flame" size={16} color={theme.text} />
           <Text style={[type.bodyStrong, { color: theme.text }]}>0</Text>
@@ -141,26 +242,70 @@ export default function Home() {
           </View>
         </View>
 
-        {/* Page 2 — micros and the health score */}
+        {/* Page 2 — the health score */}
         <View style={{ width, paddingHorizontal: space.lg }}>
-          <View style={styles.macroRow}>
-            <MacroCard label="Fiber" icon="fiber" eaten={0} target={30} color="#8B7BD8" unit="g" />
-            <MacroCard label="Sugar" icon="sugar" eaten={0} target={50} color="#E88BA8" unit="g" />
-            <MacroCard label="Sodium" icon="sodium" eaten={0} target={2300} color="#D6A648" unit="mg" />
-          </View>
-
           <View style={[styles.card, { backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
             <View style={styles.spread}>
               <Text style={[type.heading, { color: theme.text }]}>Health Score</Text>
-              <Text style={[type.heading, { color: theme.textMuted }]}>N/A</Text>
+              <Text style={[type.heading, { color: theme.textMuted }]}>
+                {hs ? `${hs.score}/10` : 'N/A'}
+              </Text>
             </View>
-            <View style={[styles.scoreTrack, { backgroundColor: theme.ringTrack }]} />
-            <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md, lineHeight: 19 }]}>
-              Log a few foods to generate today's score. Unlike the app we're replacing, the
-              formula is published and readable — it is arithmetic over what you logged, not an
-              opaque "AI" number.
-            </Text>
+            <View style={[styles.scoreTrack, { backgroundColor: theme.ringTrack }]}>
+              {hs ? (
+                <View
+                  style={{
+                    height: 8,
+                    borderRadius: 4,
+                    width: `${hs.score * 10}%` as const,
+                    backgroundColor: theme.affirm,
+                  }}
+                />
+              ) : null}
+            </View>
+            {hs ? (
+              <View style={{ marginTop: space.md, gap: 4 }}>
+                {hs.reasons.slice(0, 3).map((r) => (
+                  <Text key={r} style={[type.caption, { color: theme.textMuted }]}>
+                    · {r}
+                  </Text>
+                ))}
+              </View>
+            ) : (
+              <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md, lineHeight: 19 }]}>
+                Log a few foods to generate today's score. Unlike the app we're replacing, the
+                formula is published and readable — it is arithmetic over what you logged, not an
+                opaque "AI" number. It favors whole, animal-forward foods: protein density counts
+                for the most, fruit's fiber still counts in its favor, and sodium is a light touch.
+              </Text>
+            )}
           </View>
+
+          {micros.length > 0 ? (
+            <View style={[styles.card, { backgroundColor: theme.bgElevated, borderColor: theme.border, marginTop: space.md }]}>
+              <Text style={[type.heading, { color: theme.text }]}>Micronutrient highlights</Text>
+              <View style={{ marginTop: space.md, gap: space.md }}>
+                {micros.slice(0, 6).map((m) => (
+                  <View key={m.code}>
+                    <View style={styles.spread}>
+                      <Text style={[type.body, { color: theme.text }]}>{m.label}</Text>
+                      <Text style={[type.caption, { color: theme.textMuted }]}>{Math.round(m.pctDv)}% DV</Text>
+                    </View>
+                    <View style={[styles.microTrack, { backgroundColor: theme.ringTrack }]}>
+                      <View
+                        style={{
+                          height: 6,
+                          borderRadius: 3,
+                          width: `${Math.min(100, m.pctDv)}%` as const,
+                          backgroundColor: theme.affirm,
+                        }}
+                      />
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          ) : null}
         </View>
 
         {/* Page 3 — activity and water */}
@@ -169,23 +314,25 @@ export default function Home() {
             <View style={[styles.card, { flex: 1, backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
               <Text style={[type.caption, { color: theme.textMuted }]}>Steps</Text>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                <Text style={[styles.mid, { color: theme.text }]}>—</Text>
-                <Text style={[type.caption, { color: theme.textFaint }]}>/10,000</Text>
+                <Text style={[styles.mid, { color: theme.text }]}>
+                  {health?.stepsToday != null ? health.stepsToday.toLocaleString() : '—'}
+                </Text>
+                <Text style={[type.caption, { color: theme.textFaint }]}>/{stepGoal.toLocaleString()}</Text>
               </View>
               <View style={{ alignItems: 'center', marginTop: space.md }}>
-                <Ring pct={0} over={false} size={92} stroke={9}>
+                <Ring pct={(health?.stepsToday ?? 0) / stepGoal} over={false} size={92} stroke={9}>
                   <Icon name="steps" size={22} color={theme.textMuted} />
                 </Ring>
               </View>
               <Text style={[type.micro, { color: theme.textFaint, marginTop: space.sm }]}>
-                Needs Apple Health
+                {healthAvail === 'available' ? (health?.stepsToday == null ? 'No steps yet today' : ' ') : 'Needs Apple Health'}
               </Text>
             </View>
 
             <View style={[styles.card, { flex: 1, backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
               <Text style={[type.caption, { color: theme.textMuted }]}>Calories burned</Text>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                <Text style={[styles.mid, { color: theme.text }]}>—</Text>
+                <Text style={[styles.mid, { color: theme.text }]}>{Math.round(burnedKcal)}</Text>
                 <Text style={[type.caption, { color: theme.textFaint }]}>cal</Text>
               </View>
               <Pressable
@@ -201,17 +348,110 @@ export default function Home() {
           <View style={[styles.card, { backgroundColor: theme.bgElevated, borderColor: theme.border, marginTop: space.md }]}>
             <View style={styles.spread}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                <Icon name="moon" size={22} color={theme.protein} />
+                <View>
+                  <Text style={[type.caption, { color: theme.textMuted }]}>Sleep score</Text>
+                  <Text style={[type.bodyStrong, { color: theme.text }]}>
+                    {health?.sleepScore != null
+                      ? `${health.sleepScore}/100${health.sleepHoursLastNight != null ? ` · ${health.sleepHoursLastNight.toFixed(1)}h` : ''}`
+                      : '—'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+            {/* Same fallback rule as the Steps card above: say WHY it's empty
+                rather than silently vanishing, which reads as a missing
+                feature rather than a missing measurement. */}
+            <Text style={[type.micro, { color: theme.textFaint, marginTop: space.sm }]}>
+              {healthAvail === 'available' ? (health?.sleepScore == null ? 'No sleep data yet' : ' ') : 'Needs Apple Health'}
+            </Text>
+          </View>
+
+          {exerciseList.length > 0 || healthWorkouts.length > 0 ? (
+            <View style={[styles.card, { backgroundColor: theme.bgElevated, borderColor: theme.border, marginTop: space.md }]}>
+              <Text style={[type.label, { color: theme.textMuted }]}>Today's exercise</Text>
+              {exerciseList.map((e) => (
+                <Pressable
+                  key={`log-${e.id}`}
+                  accessibilityRole="button"
+                  onPress={() => router.push({ pathname: '/exercise-detail', params: { id: String(e.id) } } as never)}
+                  style={[styles.exerciseRow, { borderColor: theme.border }]}
+                >
+                  <Text style={[type.body, { color: theme.text, flex: 1 }]} numberOfLines={1}>
+                    {e.name}
+                  </Text>
+                  <Text style={[type.body, { color: theme.textMuted }]}>{Math.round(e.kcal)} cal</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${e.name}`}
+                    onPress={() => {
+                      setExerciseList((cur) => cur.filter((x) => x.id !== e.id))
+                      setExercise((cur) => ({ kcal: cur.kcal - e.kcal, count: cur.count - 1 }))
+                      void deleteExerciseEntry(e.id)
+                    }}
+                    hitSlop={space.md}
+                    style={styles.remove}
+                  >
+                    <Text style={{ color: theme.textFaint, fontSize: 18 }}>×</Text>
+                  </Pressable>
+                </Pressable>
+              ))}
+              {/* From Apple Health: informational only. Its energy is already
+                  folded into "Calories burned" via activeEnergyToday, so these
+                  rows carry no delete/edit control — removing one here would
+                  imply it changes the total, and it would not. */}
+              {healthWorkouts.map((w) => (
+                <View key={`hk-${w.id}`} style={[styles.exerciseRow, { borderColor: theme.border }]}>
+                  <Icon name="heart" size={16} color={theme.textFaint} />
+                  <Text style={[type.body, { color: theme.text, flex: 1 }]} numberOfLines={1}>
+                    {w.name}
+                  </Text>
+                  <Text style={[type.body, { color: theme.textMuted }]}>
+                    {w.kcal != null ? `${Math.round(w.kcal)} cal` : `${Math.round(w.durationMin)} min`}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          <View style={[styles.card, { backgroundColor: theme.bgElevated, borderColor: theme.border, marginTop: space.md }]}>
+            <View style={styles.spread}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
                 <Icon name="water" size={22} color={theme.protein} />
                 <View>
                   <Text style={[type.caption, { color: theme.textMuted }]}>Water</Text>
-                  <Text style={[type.bodyStrong, { color: theme.text }]}>0 fl oz</Text>
+                  <Text style={[type.bodyStrong, { color: theme.text }]}>{Math.round(waterFlOz)} fl oz</Text>
                 </View>
               </View>
-              <Pressable style={[styles.ghost, { borderColor: theme.border }]}>
-                <Text style={[type.label, { color: theme.text }]}>Log Water</Text>
-              </Pressable>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                {waterMl > 0 ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove last water entry"
+                    onPress={removeWater}
+                    hitSlop={space.md}
+                    style={[styles.waterStep, { borderColor: theme.border }]}
+                  >
+                    <Text style={[type.bodyStrong, { color: theme.text }]}>–</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={addWater}
+                  style={[styles.ghost, { borderColor: theme.border }]}
+                >
+                  <Text style={[type.label, { color: theme.text }]}>+8 fl oz</Text>
+                </Pressable>
+              </View>
             </View>
           </View>
+
+          {healthAvail === 'available' && burnedKcal > 0 ? (
+            <Text style={[type.micro, { color: theme.textFaint, marginTop: space.md, lineHeight: 16 }]}>
+              Includes Apple Health activity. Logging a workout by hand that a paired Apple Watch
+              also measured can count it twice.
+            </Text>
+          ) : null}
         </View>
       </ScrollView>
 
@@ -225,34 +465,57 @@ export default function Home() {
         ))}
       </View>
 
-      {/* Adaptive target status — always legible, never a silent change. */}
-      <View style={{ paddingHorizontal: space.lg }}>
-        <View style={[styles.card, { backgroundColor: theme.bgSunken, borderColor: 'transparent' }]}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-            <Icon name="target" size={18} color={theme.text} />
-            <Text style={[type.bodyStrong, { color: theme.text }]}>Your target</Text>
+      {/* A real target change is news — surfaced once, on its own, never buried
+          inside the daily weigh-in prompt below. */}
+      {adaptive?.surfaced ? (
+        <View style={{ paddingHorizontal: space.lg }}>
+          <View style={[styles.card, { backgroundColor: theme.bgSunken, borderColor: 'transparent' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+              <Icon name="target" size={18} color={theme.text} />
+              <Text style={[type.bodyStrong, { color: theme.text }]}>Your target changed</Text>
+            </View>
+            <Text style={[type.caption, { color: theme.textMuted, marginTop: space.xs, lineHeight: 19 }]}>
+              Updated to {Math.round(adaptive.newKcal ?? 0)} kcal. {adaptive.explanation}
+            </Text>
           </View>
-          <Text style={[type.caption, { color: theme.textMuted, marginTop: space.xs, lineHeight: 19 }]}>
-            {adaptive?.surfaced
-              ? `Updated to ${Math.round(adaptive.newKcal ?? 0)} kcal. ${adaptive.explanation}`
-              : goal.adaptive
-                ? (adaptive?.reason ?? 'Adapting from your own trend and intake.')
-                : 'Fixed — you set this by hand, so we leave it alone.'}
-          </Text>
-          <Pressable
-            onPress={() => router.push('/log-weight' as never)}
-            hitSlop={space.sm}
-            style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs, marginTop: space.md }}
-          >
-            <Icon name="scale" size={16} color={theme.protein} />
-            <Text style={[type.label, { color: theme.protein }]}>Log today's weight</Text>
-          </Pressable>
         </View>
+      ) : null}
+
+      {/* Today's weigh-in — a plain check-in, not a status report on a number
+          most people don't know how to read. */}
+      <View style={{ paddingHorizontal: space.lg, marginTop: adaptive?.surfaced ? space.md : 0 }}>
+        <Pressable
+          onPress={() => router.push('/log-weight' as never)}
+          style={[styles.card, styles.spread, { backgroundColor: theme.bgSunken, borderColor: 'transparent' }]}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, flex: 1 }}>
+            <View
+              style={[
+                styles.checkbox,
+                {
+                  borderColor: weightLoggedToday ? theme.affirm : theme.border,
+                  backgroundColor: weightLoggedToday ? theme.affirm : 'transparent',
+                },
+              ]}
+            >
+              {weightLoggedToday ? <Icon name="check" size={14} color={theme.bg} /> : null}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[type.bodyStrong, { color: theme.text }]}>Log weight today</Text>
+              <Text style={[type.caption, { color: theme.textMuted, marginTop: 2 }]}>
+                {weightLoggedToday && latestWeightKg != null
+                  ? `Logged — ${formatWeightKg(latestWeightKg, unitPref)}`
+                  : 'Not logged yet today'}
+              </Text>
+            </View>
+          </View>
+          <Icon name="scale" size={18} color={theme.protein} />
+        </Pressable>
       </View>
 
-      {/* Recently uploaded */}
+      {/* Today's log — tappable, so a logged meal is editable, not a dead end */}
       <View style={{ paddingHorizontal: space.lg, marginTop: space.xl }}>
-        <Text style={[type.title, { color: theme.text, fontSize: 24 }]}>Recently uploaded</Text>
+        <Text style={[type.title, { color: theme.text, fontSize: 24 }]}>Today's log</Text>
 
         {empty ? (
           <View style={[styles.emptyCard, { backgroundColor: theme.bgSunken }]}>
@@ -268,10 +531,33 @@ export default function Home() {
             </Text>
           </View>
         ) : (
-          <View style={[styles.card, { backgroundColor: theme.bgSunken, borderColor: 'transparent' }]}>
-            <Text style={[type.bodyStrong, { color: theme.text }]}>
-              {totals.mealCount} {totals.mealCount === 1 ? 'meal' : 'meals'} logged
-            </Text>
+          <View style={{ marginTop: space.sm, gap: space.sm }}>
+            {meals.map((m) => (
+              <Pressable
+                key={m.id}
+                accessibilityRole="button"
+                onPress={() => router.push({ pathname: '/meal-detail', params: { id: String(m.id) } } as never)}
+                style={[styles.mealRow, { backgroundColor: theme.bgSunken }]}
+              >
+                {m.photoUri ? (
+                  <Image source={{ uri: m.photoUri }} style={styles.mealThumb} />
+                ) : (
+                  <View style={[styles.mealThumb, styles.mealThumbFallback, { backgroundColor: theme.bgElevated }]}>
+                    <Icon name="bowl" size={20} color={theme.textFaint} />
+                  </View>
+                )}
+                <View style={{ flex: 1 }}>
+                  <Text style={[type.bodyStrong, { color: theme.text }]} numberOfLines={1}>
+                    {m.name}
+                  </Text>
+                  <Text style={[type.caption, { color: theme.textMuted, marginTop: 2 }]}>
+                    {m.mealSlot ?? 'meal'}
+                  </Text>
+                </View>
+                <Text style={[type.bodyStrong, { color: theme.text }]}>{Math.round(m.kcal)} cal</Text>
+                <Icon name="chevron" size={16} color={theme.textFaint} />
+              </Pressable>
+            ))}
             {totals.pendingCount > 0 ? (
               <Text style={[type.caption, { color: theme.uncertain, marginTop: space.xs }]}>
                 +{totals.pendingCount} still analyzing — not counted yet
@@ -460,10 +746,24 @@ const styles = StyleSheet.create({
   macroNum: { fontSize: 22, fontWeight: '800', letterSpacing: -0.6 },
   card: { padding: space.lg, borderRadius: radius.xl, borderWidth: StyleSheet.hairlineWidth },
   spread: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 7,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   scoreTrack: { height: 8, borderRadius: 4, marginTop: space.md },
   ghost: {
     paddingHorizontal: space.lg, paddingVertical: space.sm,
     borderRadius: radius.pill, borderWidth: StyleSheet.hairlineWidth,
+  },
+  microTrack: { height: 6, borderRadius: 3, marginTop: space.xs, overflow: 'hidden' },
+  waterStep: {
+    width: MIN_TAP_TARGET, height: MIN_TAP_TARGET,
+    borderRadius: radius.pill, borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center', justifyContent: 'center',
   },
   dots: { flexDirection: 'row', justifyContent: 'center', gap: space.sm, marginTop: space.lg },
   dot: { width: 7, height: 7, borderRadius: 4 },
@@ -473,4 +773,23 @@ const styles = StyleSheet.create({
     padding: space.lg, borderRadius: radius.lg,
   },
   skeleton: { height: 8, borderRadius: 4 },
+  exerciseRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingVertical: space.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: space.sm,
+  },
+  remove: { width: MIN_TAP_TARGET, height: MIN_TAP_TARGET, alignItems: 'center', justifyContent: 'center' },
+  mealRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    padding: space.md,
+    borderRadius: radius.lg,
+    minHeight: MIN_TAP_TARGET,
+  },
+  mealThumb: { width: 48, height: 48, borderRadius: radius.md },
+  mealThumbFallback: { alignItems: 'center', justifyContent: 'center' },
 })

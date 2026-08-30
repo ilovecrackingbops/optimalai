@@ -57,7 +57,7 @@ export async function exportAndShareBackup(): Promise<ExportResult> {
     await Sharing.shareAsync(file.uri, {
       mimeType: 'application/json',
       UTI: 'public.json',
-      dialogTitle: 'Export Nut AI data',
+      dialogTitle: 'Export Optimal AI data',
     })
     shared = true
   }

@@ -182,11 +182,24 @@ export function estimateGrams(input: EstimateGramsInput): GramResult {
   // 189. So when the prior is driving, the raw guess does not also get a vote.
   const priorIsDriving = isTrusted(prior) && item.model_gram_estimate != null
   if (item.model_gram_estimate != null && !priorIsDriving) {
+    // A rough photo-based guess and "the user typed '300g' and the model
+    // copied it into model_gram_estimate" are NOT the same signal, but this
+    // tier's fixed weight used to treat them identically — 0.25, always
+    // below Tier 4's fndds_standard_portion (0.55), which is a GENERIC
+    // small/medium/large lookup keyed to nothing the user actually said.
+    // Text-only entries with a real, high-confidence stated quantity
+    // (@nutai/prompt's text-food-log.ts sets portion_confidence high
+    // specifically for this case) were losing the reconciliation to that
+    // generic default — "300 g of ground beef" resolving against a ~90 g
+    // "medium serving" fallback instead of the number that was TYPED.
+    // portion_confidence is the model's own signal for exactly this
+    // distinction, and until now nothing in gram estimation ever read it.
+    const stated = item.portion_confidence >= 0.75
     candidates.push({
       grams: item.model_gram_estimate,
       pathway: 'model_guess',
-      weight: 0.25,
-      spread: 0.4,
+      weight: stated ? 0.7 : 0.25,
+      spread: stated ? 0.15 : 0.4,
     })
   }
 

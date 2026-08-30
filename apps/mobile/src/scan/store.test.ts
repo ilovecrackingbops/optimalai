@@ -3,7 +3,9 @@ import type { Band } from '@nutai/confidence'
 import type { IngredientRow, LoggedMeal } from '@nutai/core-schema'
 import { recomputeAfterEdit } from '@nutai/pipeline'
 import type { ScanResult } from '@nutai/pipeline'
+import { QUESTION_BANK, type SelectedQuestion } from '@nutai/repair'
 import {
+  answerQuestion,
   applyWebOption,
   editGrams,
   getPhase,
@@ -90,6 +92,99 @@ describe('editGrams', () => {
     editGrams('r1', Number.NaN)
     editGrams('r1', -50)
     expect(readyPhase().result.totals.kcal).toBe(before)
+  })
+})
+
+describe('answerQuestion — raw_or_cooked', () => {
+  const rawOrCooked = QUESTION_BANK.find((q) => q.id === 'raw_or_cooked')!
+
+  function questionFor(rowId: string): SelectedQuestion {
+    return {
+      question: rawOrCooked,
+      text: rawOrCooked.text,
+      expectedValue: 100,
+      state: 'highlighted',
+      appliedDefault: null,
+      disclosure: rawOrCooked.defaultDisclosure,
+      rowId,
+    }
+  }
+
+  // Regression for a real bug: tapping "Raw weight" / "Cooked weight" did
+  // nothing at all — SelectedQuestion carried no rowId, so answerQuestion had
+  // no way to know which ingredient the answer was even about, and this
+  // question id was not one of the two (portion_eaten, cooking_oil) with a
+  // hand-rolled workaround.
+
+  it('converts a cooked-basis match toward raw weight when the user says the number was raw', () => {
+    readyWith([row({ displayName: 'Chicken, broilers or fryers, breast, meat only, cooked, roasted', grams: 200 })])
+    answerQuestion(questionFor('r1'), 'raw')
+    // Cooking concentrates mass loss; a cooked-basis row told "that 200 was
+    // raw" should scale DOWN to the cooked-equivalent grams actually eaten.
+    expect(readyPhase().result.meal.ingredients[0]?.grams).toBeCloseTo(150, 0)
+  })
+
+  it('converts a raw-basis match toward cooked weight when the user says the number was cooked', () => {
+    readyWith([row({ displayName: 'Chicken, broiler or fryers, breast, skinless, boneless, meat only, raw', grams: 200 })])
+    answerQuestion(questionFor('r1'), 'cooked')
+    expect(readyPhase().result.meal.ingredients[0]?.grams).toBeCloseTo(266.67, 0)
+  })
+
+  it('does nothing when the answer already matches the row — no spurious edit', () => {
+    readyWith([row({ displayName: 'Chicken, breast, raw', grams: 200 })])
+    answerQuestion(questionFor('r1'), 'raw')
+    expect(readyPhase().result.meal.ingredients[0]?.grams).toBe(200)
+  })
+
+  it('is a safe no-op when the row cannot be identified or the name gives no basis to reconcile', () => {
+    readyWith([row({ id: 'r1', displayName: 'Mystery casserole', grams: 200 })])
+    answerQuestion(questionFor('nonexistent-row'), 'raw')
+    expect(readyPhase().result.meal.ingredients[0]?.grams).toBe(200)
+    answerQuestion(questionFor('r1'), 'raw')
+    expect(readyPhase().result.meal.ingredients[0]?.grams).toBe(200)
+  })
+})
+
+describe('answerQuestion — regular_or_diet', () => {
+  const regularOrDiet = QUESTION_BANK.find((q) => q.id === 'regular_or_diet')!
+
+  function questionFor(rowId: string): SelectedQuestion {
+    return {
+      question: regularOrDiet,
+      text: regularOrDiet.text,
+      expectedValue: 100,
+      state: 'highlighted',
+      appliedDefault: null,
+      disclosure: regularOrDiet.defaultDisclosure,
+      rowId,
+    }
+  }
+
+  // Regression for a real bug: neither "Regular" nor "Diet / zero" did
+  // anything — this question id had no handler at all, and the "wired at the
+  // screen level" swap the store.ts comment promised was never actually built
+  // into the result screen, so both buttons were silently inert.
+
+  it('zeroes out calories, protein, fat, and carbs when the user says diet', () => {
+    readyWith([row({ displayName: 'Cola', grams: 355, nutrientSnapshot: { kcal: 42, protein_g: 0, fat_g: 0, carbs_g: 10.6, fiber_g: 0, sugar_g: 10.6, sodium_mg: 4 } })])
+    answerQuestion(questionFor('r1'), 'diet')
+    const snap = readyPhase().result.meal.ingredients[0]!.nutrientSnapshot
+    expect(snap.kcal).toBe(0)
+    expect(snap.carbs_g).toBe(0)
+    // Sodium is independent of sweetener choice — left as-is, not zeroed.
+    expect(snap.sodium_mg).toBe(4)
+  })
+
+  it('leaves the row untouched when the user confirms regular — it was already the default', () => {
+    readyWith([row({ displayName: 'Cola', grams: 355, nutrientSnapshot: { kcal: 42, protein_g: 0, fat_g: 0, carbs_g: 10.6, fiber_g: 0, sugar_g: 10.6, sodium_mg: 4 } })])
+    answerQuestion(questionFor('r1'), 'regular')
+    expect(readyPhase().result.meal.ingredients[0]!.nutrientSnapshot.kcal).toBe(42)
+  })
+
+  it('is a safe no-op when the row cannot be identified', () => {
+    readyWith([row({ id: 'r1', displayName: 'Cola', grams: 355 })])
+    answerQuestion(questionFor('nonexistent-row'), 'diet')
+    expect(readyPhase().result.meal.ingredients[0]?.nutrientSnapshot.kcal).toBe(165)
   })
 })
 

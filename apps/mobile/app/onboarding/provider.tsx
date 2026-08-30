@@ -11,7 +11,7 @@ import { useTheme } from '../../src/theme/ThemeProvider'
 import { radius, space, type } from '../../src/theme/tokens'
 
 /**
- * How should Nut AI recognize your food?
+ * How should Optimal AI recognize your food?
  *
  * THE PICKER IS NEUTRAL. Price-sorted, no "recommended" badge, no pre-selected
  * provider. Within a chosen provider the cheapest vision model is pre-selected,
@@ -38,7 +38,7 @@ export default function ProviderScreen() {
     <OnboardingScreen
       step={stepIndex('provider')}
       total={TOTAL_STEPS}
-      title="How should Nut AI recognize your food?"
+      title="How should Optimal AI recognize your food?"
       subtitle="Bring your own API key. Your photo goes to the provider you name and nowhere else — we run no server."
       ctaDisabled={a.provider === undefined}
       onCta={() => {

@@ -3,13 +3,13 @@ import { useCallback, useMemo, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Svg, { Circle, Line as SvgLine, Path, Rect, Text as SvgText } from 'react-native-svg'
+import { Image } from 'expo-image'
 import { bmi, computeTrend, trendSlopeLbPerWeek, type TrendPoint, type WeightPoint } from '@nutai/goals'
-import { currentGoal, db, setting, weightHistory, type CurrentGoal } from '../../src/data/repo'
+import { currentGoal, db, physiqueHistory, setting, weightHistory, type CurrentGoal, type PhysiqueEntry } from '../../src/data/repo'
+import { displayWeight, getUnitPref, LB_PER_KG, weightUnitLabel, type UnitPref } from '../../src/data/units'
 import { Icon } from '../../src/components/Icon'
 import { useTheme } from '../../src/theme/ThemeProvider'
 import { radius, space, type } from '../../src/theme/tokens'
-
-const LB_PER_KG = 2.20462
 
 const WINDOWS = [
   { key: '90D', days: 90 },
@@ -30,18 +30,22 @@ export default function Progress() {
   const [goalKg, setGoalKg] = useState<number | null>(null)
   const [streak, setStreak] = useState(0)
   const [window, setWindow] = useState<(typeof WINDOWS)[number]['key']>('90D')
+  const [physique, setPhysique] = useState<PhysiqueEntry[]>([])
+  const [unitPref, setUnitPref] = useState<UnitPref>('imperial')
 
   useFocusEffect(
     useCallback(() => {
       let alive = true
       void (async () => {
         const h = await db()
-        const [pts, g, target, profile, days] = await Promise.all([
+        const [pts, g, target, profile, days, phys, units] = await Promise.all([
           weightHistory(),
           currentGoal(),
           setting('goal.desiredWeightKg', ''),
           h.get<{ height_cm: number }>('SELECT height_cm FROM user_profile WHERE id = 1'),
           h.all<{ local_date: string }>('SELECT DISTINCT local_date FROM meals ORDER BY local_date DESC'),
+          physiqueHistory(),
+          getUnitPref(),
         ])
         if (!alive) return
         setPoints(pts)
@@ -49,6 +53,8 @@ export default function Progress() {
         setGoalKg(target ? Number(target) : null)
         setHeightCm(profile?.height_cm ?? null)
         setStreak(countStreak(days.map((d) => d.local_date)))
+        setPhysique(phys)
+        setUnitPref(units)
       })()
       return () => {
         alive = false
@@ -108,7 +114,7 @@ export default function Progress() {
           </Pressable>
         </View>
         <Text style={[styles.big, { color: theme.text }]}>
-          {currentKg != null ? `${(currentKg * LB_PER_KG).toFixed(1)} lbs` : '—'}
+          {currentKg != null ? `${displayWeight(currentKg, unitPref).toFixed(1)} ${weightUnitLabel(unitPref)}` : '—'}
         </Text>
 
         <View style={[styles.bar, { backgroundColor: theme.ringTrack }]}>
@@ -116,10 +122,10 @@ export default function Progress() {
         </View>
         <View style={styles.spread}>
           <Text style={[type.caption, { color: theme.textMuted }]}>
-            Start: {startKg != null ? `${(startKg * LB_PER_KG).toFixed(1)} lbs` : '—'}
+            Start: {startKg != null ? `${displayWeight(startKg, unitPref).toFixed(1)} ${weightUnitLabel(unitPref)}` : '—'}
           </Text>
           <Text style={[type.caption, { color: theme.textMuted }]}>
-            Goal: {goalKg != null ? `${(goalKg * LB_PER_KG).toFixed(1)} lbs` : '—'}
+            Goal: {goalKg != null ? `${displayWeight(goalKg, unitPref).toFixed(1)} ${weightUnitLabel(unitPref)}` : '—'}
           </Text>
         </View>
       </View>
@@ -137,7 +143,7 @@ export default function Progress() {
             No weigh-ins yet. It takes about five before a slope means anything.
           </Text>
         ) : (
-          <WeightChart trend={visible} />
+          <WeightChart trend={visible} unitPref={unitPref} />
         )}
 
         <View style={[styles.segment, { backgroundColor: theme.bgElevated }]}>
@@ -169,9 +175,9 @@ export default function Progress() {
       <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>
         <Text style={[type.heading, { color: theme.text }]}>Weight changes</Text>
         {CHANGE_WINDOWS.map((d) => (
-          <ChangeRow key={d} label={`${d} day`} lbs={changeOver(trend, d)} />
+          <ChangeRow key={d} label={`${d} day`} lbs={changeOver(trend, d)} unitPref={unitPref} />
         ))}
-        <ChangeRow label="All time" lbs={changeOver(trend, Number.POSITIVE_INFINITY)} />
+        <ChangeRow label="All time" lbs={changeOver(trend, Number.POSITIVE_INFINITY)} unitPref={unitPref} />
         <Text style={[type.caption, { color: theme.textFaint, marginTop: space.md, lineHeight: 18 }]}>
           Measured on the trend line, not raw weigh-ins — a 3 lb overnight swing is water, and
           reporting it as a change would be reporting noise as progress.
@@ -181,7 +187,11 @@ export default function Progress() {
       <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>
         <Text style={[type.heading, { color: theme.text }]}>Rate of change</Text>
         <Text style={[styles.big, { color: theme.text }]}>
-          {slope == null ? '—' : `${slope > 0 ? '+' : ''}${slope.toFixed(2)} lb/wk`}
+          {slope == null
+            ? '—'
+            : unitPref === 'metric'
+              ? `${slope > 0 ? '+' : ''}${(slope / LB_PER_KG).toFixed(2)} kg/wk`
+              : `${slope > 0 ? '+' : ''}${slope.toFixed(2)} lb/wk`}
         </Text>
         <Text style={[type.caption, { color: theme.textMuted }]}>
           {slope == null ? 'Not enough weigh-ins yet.' : `From ${raw.length} weigh-ins.`}
@@ -202,6 +212,54 @@ export default function Progress() {
           </Text>
         </View>
       ) : null}
+
+      <Pressable
+        onPress={() => physique.length > 0 && router.push('/body-history' as never)}
+        style={[styles.card, { backgroundColor: theme.bgSunken }]}
+      >
+        <View style={styles.spread}>
+          <Text style={[type.heading, { color: theme.text }]}>Body composition</Text>
+          <Pressable onPress={() => router.push('/body-scan' as never)} hitSlop={space.sm}>
+            <Text style={[type.label, { color: theme.protein }]}>Log body photo</Text>
+          </Pressable>
+        </View>
+
+        {physique.length === 0 ? (
+          <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md }]}>
+            No body photos yet. A rough AI estimate, tracked over time — never a bare number,
+            always a range.
+          </Text>
+        ) : (
+          <>
+            {(() => {
+              const latest = physique[physique.length - 1]!
+              return (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
+                  <Image source={{ uri: latest.photoUri }} style={styles.physiqueThumb} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.big, { color: theme.text, marginTop: 0 }]}>
+                      {latest.bodyFatPctLow != null && latest.bodyFatPctHigh != null
+                        ? `${Math.round(latest.bodyFatPctLow)}–${Math.round(latest.bodyFatPctHigh)}%`
+                        : '—'}
+                    </Text>
+                    <Text style={[type.caption, { color: theme.textMuted }]}>
+                      {latest.localDate} · {latest.confidence ?? 'unknown'} confidence
+                    </Text>
+                  </View>
+                  <Icon name="chevron" size={16} color={theme.textFaint} />
+                </View>
+              )
+            })()}
+            <Text style={[type.caption, { color: theme.protein, marginTop: space.md }]}>
+              {physique.length} photo{physique.length === 1 ? '' : 's'} logged · view history
+            </Text>
+          </>
+        )}
+        <Text style={[type.caption, { color: theme.textFaint, marginTop: space.md, lineHeight: 18 }]}>
+          A rough visual estimate, not a body-composition measurement — see the estimate's own
+          caveats for what limited it.
+        </Text>
+      </Pressable>
 
       {goal ? (
         <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>
@@ -247,15 +305,17 @@ function changeOver(trend: TrendPoint[], days: number): number | null {
   return (last.trendKg - start.trendKg) * LB_PER_KG
 }
 
-function ChangeRow({ label, lbs }: { label: string; lbs: number | null }) {
+function ChangeRow({ label, lbs, unitPref }: { label: string; lbs: number | null; unitPref: UnitPref }) {
   const theme = useTheme()
   const none = lbs == null || Math.abs(lbs) < 0.05
   const up = (lbs ?? 0) > 0
+  const shown = lbs == null ? null : unitPref === 'metric' ? lbs / LB_PER_KG : lbs
+  const unit = weightUnitLabel(unitPref)
   return (
     <View style={styles.changeRow}>
       <Text style={[type.body, { color: theme.textMuted, width: 78 }]}>{label}</Text>
       <Text style={[type.bodyStrong, { color: theme.text, flex: 1 }]}>
-        {lbs == null ? '—' : `${lbs > 0 ? '+' : ''}${lbs.toFixed(1)} lbs`}
+        {shown == null ? '—' : `${shown > 0 ? '+' : ''}${shown.toFixed(1)} ${unit}`}
       </Text>
       <Text style={[type.caption, { color: none ? theme.textMuted : theme.protein }]}>
         {none ? 'No change' : up ? 'Increase' : 'Decrease'}
@@ -264,7 +324,7 @@ function ChangeRow({ label, lbs }: { label: string; lbs: number | null }) {
   )
 }
 
-function WeightChart({ trend }: { trend: TrendPoint[] }) {
+function WeightChart({ trend, unitPref }: { trend: TrendPoint[]; unitPref: UnitPref }) {
   const theme = useTheme()
   const W = 300
   const H = 170
@@ -293,7 +353,7 @@ function WeightChart({ trend }: { trend: TrendPoint[] }) {
       ))}
       {gridVals.map((v, i) => (
         <SvgText key={`t${i}`} x={2} y={y(v) + 4} fontSize="10" fill={theme.textFaint}>
-          {(v * LB_PER_KG).toFixed(0)}
+          {displayWeight(v, unitPref).toFixed(0)}
         </SvgText>
       ))}
       {trend.map((p, i) =>
@@ -350,4 +410,5 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4 },
   line: { width: 18, height: 3, borderRadius: 2 },
   changeRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md },
+  physiqueThumb: { width: 56, height: 56, borderRadius: radius.md },
 })

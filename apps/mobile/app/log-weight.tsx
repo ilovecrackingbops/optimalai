@@ -1,13 +1,12 @@
 import { router } from 'expo-router'
 import { useEffect, useState } from 'react'
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { EditableValue, RulerPicker } from '../src/components/onboarding/Controls'
-import { logWeight, setting, weightHistory } from '../src/data/repo'
+import { EditableValue, RulerPicker, Segmented } from '../src/components/onboarding/Controls'
+import { logWeight, weightHistory } from '../src/data/repo'
+import { getUnitPref, LB_PER_KG, setUnitPref } from '../src/data/units'
 import { useTheme } from '../src/theme/ThemeProvider'
 import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
-
-const LB_PER_KG = 2.20462
 
 /**
  * Log today's weight.
@@ -32,11 +31,11 @@ export default function LogWeight() {
   useEffect(() => {
     let alive = true
     void (async () => {
-      const [history, units] = await Promise.all([weightHistory(), setting('units', 'imperial')])
+      const [history, unitPref] = await Promise.all([weightHistory(), getUnitPref()])
       if (!alive) return
       const last = history[history.length - 1]
       if (last) setKg(last.weightKg)
-      setImperial(units !== 'metric')
+      setImperial(unitPref !== 'metric')
       setReady(true)
     })()
     return () => {
@@ -48,6 +47,11 @@ export default function LogWeight() {
   const min = imperial ? 60 : 30
   const max = imperial ? 500 : 227
 
+  function toggleUnits(pref: 'imperial' | 'metric') {
+    setImperial(pref === 'imperial')
+    void setUnitPref(pref)
+  }
+
   async function save() {
     if (saving) return
     setSaving(true)
@@ -56,7 +60,10 @@ export default function LogWeight() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg, paddingTop: insets.top + space.lg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg, paddingTop: insets.top + space.lg }}
+    >
       <View style={styles.head}>
         <Text style={[type.title, { color: theme.text }]}>Today's weight</Text>
         <Pressable accessibilityRole="button" onPress={() => router.back()} hitSlop={space.md}>
@@ -72,6 +79,17 @@ export default function LogWeight() {
       {ready ? (
         <>
           <View style={{ alignItems: 'center', marginTop: space.xxxl }}>
+            <Segmented
+              options={[
+                { value: 'imperial', label: 'lbs' },
+                { value: 'metric', label: 'kg' },
+              ]}
+              value={imperial ? 'imperial' : 'metric'}
+              onChange={toggleUnits}
+            />
+          </View>
+
+          <View style={{ alignItems: 'center', marginTop: space.lg }}>
             <EditableValue
               value={shown}
               unit={imperial ? 'lbs' : 'kg'}
@@ -104,7 +122,7 @@ export default function LogWeight() {
           <Text style={[type.bodyStrong, { color: theme.bg, fontSize: 18 }]}>Save</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 

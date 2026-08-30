@@ -4,6 +4,7 @@ import { matchLadder } from './query.js'
 import {
   type Candidate,
   type ResolutionOutcome,
+  type ScoredCandidate,
   type ScoringContext,
   decideOutcome,
   scoreCandidates,
@@ -52,13 +53,15 @@ SELECT f.id            AS foodId,
        f.energy_kcal      AS energyKcal,
        f.popularity_rank  AS popularityRank,
        f.completeness_score AS completenessScore,
-       bm25(food_fts, 10.0, 8.0, 4.0) AS rawBm25
+       bm25(food_fts, 10.0, 8.0, 4.0) AS rawBm25,
+       (SELECT MIN(gram_weight) FROM food_portions fp WHERE fp.food_id = f.id) AS typicalGramsMin,
+       (SELECT MAX(gram_weight) FROM food_portions fp WHERE fp.food_id = f.id) AS typicalGramsMax
 FROM food_fts
 JOIN foods f ON f.id = food_fts.rowid
 LEFT JOIN brands b ON b.id = f.brand_id
 WHERE food_fts MATCH ?
 ORDER BY rawBm25
-LIMIT 50
+LIMIT 100
 `
 
 const FOOD_BY_ID_SQL = `
@@ -113,6 +116,14 @@ export async function loadFood(db: DbAdapter, foodId: string): Promise<ResolvedF
 
 export interface ResolveResult {
   outcome: ResolutionOutcome
+  /**
+   * The top `maxCandidates` scored rows, ALWAYS populated regardless of which
+   * `outcome` fired — including on auto_accept, where `outcome.match` alone
+   * would otherwise hide every runner-up. A dedicated search results screen
+   * wants the ranked list either way; only the chip-sheet UI cares about the
+   * auto_accept/disambiguate distinction.
+   */
+  candidates: ScoredCandidate[]
   /** How far down the broadening ladder we had to go. 0 = exact first try. */
   ladderStep: number
   /** True when every rung returned nothing — this is what the 5% trigger counts. */
@@ -122,10 +133,15 @@ export interface ResolveResult {
 /**
  * Text resolution: FTS5 candidate generation, six-signal scoring, and the
  * two-part auto-accept decision.
+ *
+ * `maxCandidates` caps the disambiguation list on a miss/tie (default 5, the
+ * AI-scan chip sheet's size) — pass a larger number for a dedicated search
+ * results screen.
  */
 export async function resolveByText(
   db: DbAdapter,
   ctx: ScoringContext,
+  maxCandidates = 5,
 ): Promise<ResolveResult> {
   const ladder = matchLadder(ctx.canonicalFoodKey)
 
@@ -150,8 +166,13 @@ export async function resolveByText(
       rows.map((r) => ({ ...r, foodId: String(r.foodId) })),
       ctx,
     )
-    return { outcome: decideOutcome(scored), ladderStep: step, zeroHit: false }
+    return {
+      outcome: decideOutcome(scored, maxCandidates),
+      candidates: scored.slice(0, maxCandidates),
+      ladderStep: step,
+      zeroHit: false,
+    }
   }
 
-  return { outcome: { kind: 'miss' }, ladderStep: ladder.length, zeroHit: true }
+  return { outcome: { kind: 'miss' }, candidates: [], ladderStep: ladder.length, zeroHit: true }
 }

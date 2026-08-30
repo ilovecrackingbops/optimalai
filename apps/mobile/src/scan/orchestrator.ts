@@ -1,4 +1,3 @@
-import * as ImageManipulator from 'expo-image-manipulator'
 import { SEEDED_BASELINES, type Band } from '@nutai/confidence'
 import {
   LabelPayloadZ,
@@ -11,6 +10,7 @@ import {
 import type { PersonalPriors } from '@nutai/gram-engine'
 import {
   anthropicWireSchema,
+  buildLocalSignalsBlock,
   cheapestModel,
   geminiWireSchema,
   openAiWireSchema,
@@ -23,7 +23,8 @@ import { openNutritionDb } from '../db/expo-adapter'
 import { loadFoodDb } from '../db/portions'
 import { setting } from '../data/repo'
 import { loadCredential, type StoredCredential } from '../inference/credentials'
-import { runLabelScan, runReceiptScan, runScanWithFallback, runWebLookup } from '../inference/pathA/client'
+import { runLabelScan, runReceiptScan, runScanWithFallback, runTextFoodScan, runWebLookup } from '../inference/pathA/client'
+import { preprocessPhoto } from '../media/preprocess'
 import { applyWebOption, getPhase, setPhase, setWebLookup } from './store'
 
 /**
@@ -55,26 +56,12 @@ function wireSchemaFor(provider: ProviderId): Record<string, unknown> {
   return geminiWireSchema(VISION_WIRE_SCHEMA)
 }
 
-async function preprocess(photoUri: string): Promise<string> {
-  const ctx = ImageManipulator.ImageManipulator.manipulate(photoUri)
-  // Resize BEFORE encoding — the order is what bounds memory, not the format.
-  ctx.resize({ width: 1024 })
-  const image = await ctx.renderAsync()
-  const saved = await image.saveAsync({
-    compress: 0.8,
-    format: ImageManipulator.SaveFormat.JPEG,
-    base64: true,
-  })
-  if (!saved.base64) throw new Error('preprocess produced no base64')
-  return saved.base64
-}
-
-export async function startScan(photoUri: string): Promise<void> {
+export async function startScan(photoUri: string, userHint?: string): Promise<void> {
   setPhase({ kind: 'analyzing', photoUri, stage: 'preparing' })
 
   let base64: string
   try {
-    base64 = await preprocess(photoUri)
+    base64 = await preprocessPhoto(photoUri)
   } catch {
     setPhase({
       kind: 'failed',
@@ -86,7 +73,10 @@ export async function startScan(photoUri: string): Promise<void> {
   }
 
   lastCapture = { photoUri, base64 }
-  await analyze(photoUri, base64)
+  const hint = userHint?.trim()
+  await analyze(photoUri, base64, {
+    localSignalsBlock: hint ? buildLocalSignalsBlock({ userHint: hint }) : undefined,
+  })
 }
 
 export async function retryScan(): Promise<void> {
@@ -97,8 +87,12 @@ export async function retryScan(): Promise<void> {
 }
 
 interface AnalyzeOpts {
-  /** Prepended context for a Fix Result pass. */
-  fixBlock?: string
+  /**
+   * The `<user_context>` block sent alongside the image — either the capture-time
+   * hint from `startScan`'s `userHint`, or the Fix Result correction block built
+   * by `fixScan`. The two are mutually exclusive per call.
+   */
+  localSignalsBlock?: string
   /** Prior scan's meta, so the ledger bills one meal for both calls. */
   priorMeta?: { inputTokens: number; outputTokens: number; costUsd: number } | null
   /** Portion fraction to carry across a fix — user answers survive re-analysis. */
@@ -139,7 +133,7 @@ async function analyze(photoUri: string, base64: string, opts: AnalyzeOpts = {})
     model,
     credential,
     imagesBase64: [base64],
-    localSignalsBlock: opts.fixBlock ?? '',
+    localSignalsBlock: opts.localSignalsBlock ?? '',
     jsonSchema: wireSchemaFor(provider),
   })
 
@@ -316,7 +310,107 @@ export async function fixScan(note: string): Promise<void> {
   const photoUri = phase.photoUri ?? lastCapture.photoUri
 
   setPhase({ kind: 'analyzing', photoUri, stage: 'identifying' })
-  await analyze(photoUri, lastCapture.base64, { fixBlock, priorMeta, keepFraction })
+  await analyze(photoUri, lastCapture.base64, { localSignalsBlock: fixBlock, priorMeta, keepFraction })
+}
+
+/**
+ * Text-only quick-add — "I had a bowl of oatmeal with a banana, roughly".
+ *
+ * No photo at all, so `photoUri: ''` — same convention `startBarcodeScan`
+ * already uses for photo-less entries. The model call
+ * (`runTextFoodScan`) still returns the SAME VisionPayload shape a photo scan
+ * does, which is what lets this share the rest of the pipeline — matching
+ * against the corpus, confidence bands, background web-lookup refinement, and
+ * the ordinary `result.tsx` review screen — with zero forked logic.
+ */
+export async function startTextScan(description: string): Promise<void> {
+  const photoUri = ''
+  setPhase({ kind: 'analyzing', photoUri, stage: 'identifying' })
+
+  const provider = (await setting('provider')) as ProviderId | 'none' | ''
+  if (!provider || provider === 'none') {
+    setPhase({
+      kind: 'failed',
+      photoUri,
+      message: 'Describing a meal needs an API key. Add one in Profile — barcode, search and manual logging work without one.',
+      canRetry: false,
+      failureKind: 'no-key',
+    })
+    return
+  }
+
+  const credential = await loadCredential(provider)
+  if (!credential) {
+    setPhase({
+      kind: 'failed',
+      photoUri,
+      message: 'Your saved key is missing. Re-enter it in Profile.',
+      canRetry: false,
+      failureKind: 'key-invalid',
+    })
+    return
+  }
+
+  const model = (await setting('provider_model')) || cheapestModel(provider).id
+  const outcome = await runTextFoodScan(provider, { model, description }, credential)
+
+  if (!outcome.ok) {
+    setPhase({
+      kind: 'failed',
+      photoUri,
+      message: outcome.error?.message ?? 'Could not turn that into a meal.',
+      canRetry: outcome.error?.retryable ?? false,
+      failureKind: outcome.error?.kind,
+    })
+    return
+  }
+
+  setPhase({ kind: 'analyzing', photoUri, stage: 'matching' })
+
+  let result: ScanResult | null = null
+  try {
+    const nutritionDb = await openNutritionDb()
+    const foodDb = await loadFoodDb(nutritionDb)
+    result = await runPipeline(
+      outcome.raw,
+      { db: nutritionDb, priors: EMPTY_PRIORS, baselines: SEEDED_BASELINES, path: 'cloud', now: Date.now() },
+      foodDb,
+    )
+  } catch {
+    result = null
+  }
+
+  if (!result) {
+    setPhase({
+      kind: 'failed',
+      photoUri,
+      message: 'The model answered in a shape we could not use. This one is on us — try once more.',
+      canRetry: true,
+      failureKind: 'schema-violation',
+    })
+    return
+  }
+
+  if (!result.isFood) {
+    setPhase({
+      kind: 'failed',
+      photoUri,
+      message: result.refusalReason || 'That did not describe anything edible.',
+      canRetry: false,
+    })
+    return
+  }
+
+  setPhase({
+    kind: 'ready',
+    photoUri: null,
+    result,
+    bands: result.items.map((i) => i.band),
+    meta: null,
+    webLookups: {},
+  })
+
+  void refineMisses(result, outcome.raw, provider, model, credential)
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +609,7 @@ export async function startLabelScan(photoUri: string): Promise<void> {
 
   let base64: string
   try {
-    base64 = await preprocess(photoUri)
+    base64 = await preprocessPhoto(photoUri)
   } catch {
     setPhase({ kind: 'failed', photoUri, message: 'Could not read the photo. Try taking it again.', canRetry: false })
     return
@@ -618,7 +712,7 @@ export async function startReceiptScan(photoUri: string): Promise<void> {
 
   let base64: string
   try {
-    base64 = await preprocess(photoUri)
+    base64 = await preprocessPhoto(photoUri)
   } catch {
     setPhase({ kind: 'failed', photoUri, message: 'Could not read the photo. Try taking it again.', canRetry: false })
     return

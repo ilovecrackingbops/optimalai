@@ -33,7 +33,7 @@ export default function RestoreScreen() {
       setError(
         res.reason === 'bad-json'
           ? 'That file could not be read as JSON.'
-          : "That doesn't look like a Nut AI backup file.",
+          : "That doesn't look like an Optimal AI backup file.",
       )
       return
     }
@@ -56,7 +56,7 @@ export default function RestoreScreen() {
               try {
                 const outcome = await importBackup(payload)
                 if (!outcome.ok) {
-                  setError('This backup was made with a newer version of Nut AI — update the app first.')
+                  setError('This backup was made with a newer version of Optimal AI — update the app first.')
                   return
                 }
                 await finishRestore()
@@ -78,7 +78,7 @@ export default function RestoreScreen() {
     <View style={[styles.root, { backgroundColor: theme.bg, paddingTop: insets.top + space.xl }]}>
       <Text style={[type.title, { color: theme.text, fontSize: 30 }]}>Restore from a backup</Text>
       <Text style={[type.body, { color: theme.textMuted, marginTop: space.sm, lineHeight: 22 }]}>
-        Pick a Nut AI export file — everything comes back exactly as it was: meals, weights,
+        Pick an Optimal AI export file — everything comes back exactly as it was: meals, weights,
         goals, settings.
       </Text>
 

@@ -208,4 +208,28 @@ maybe('the pipeline against the real USDA corpus', () => {
     expect(r!.totals.kcal).toBeLessThan(700)
     expect(r!.totals.protein_g).toBeGreaterThan(15)
   })
+
+  /**
+   * THE EGG REGRESSION. A real user typed "4 raw eggs" through the text-only
+   * describe-a-food path. The model's canonical_food_key was the plain, honest
+   * "egg, raw" — nobody says "whole eggs" — and the resolver matched it to
+   * "Egg, yolk, raw, fresh" (322 kcal/100g) instead of "Egg, whole, raw, fresh"
+   * (143 kcal/100g): 200g logged as 644 kcal instead of ~286. Every scoring
+   * signal ties whole/yolk/white on a bare "egg" query in the real corpus too
+   * (same category, same bm25, same raw-preference), and the yolk row happens
+   * to be the more popular one, which is what won the old tie-break.
+   */
+  it('resolves a plain "eggs" text-log to whole egg, not yolk', async () => {
+    const r = await runPipeline(
+      payload([item({ name: 'Eggs', canonical_food_key: 'egg, raw', food_form: 'discrete', qualitative_size: 'count:4', model_gram_estimate: 200 })]),
+      deps(), foodDb,
+    )
+    expect(r).not.toBeNull()
+    const row = r!.items[0]!.row
+    expect(r!.items[0]!.resolution).not.toBe('miss')
+    // Whole egg is ~143 kcal/100g; yolk is ~322. 200g must land near the
+    // former, nowhere close to the 644 kcal the yolk row produced.
+    expect(row.nutrientSnapshot.kcal).toBeLessThan(200)
+    expect(r!.totals.kcal).toBeLessThan(350)
+  })
 })

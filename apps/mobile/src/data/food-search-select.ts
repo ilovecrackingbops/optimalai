@@ -1,5 +1,6 @@
 import type { DbAdapter } from '@nutai/db-adapter'
 import type { ScoredCandidate } from '@nutai/resolver'
+import { classifyCategory } from './food-category'
 import type { ManualFoodSelection } from './manual-food'
 
 /**
@@ -18,6 +19,7 @@ interface FoodRow {
   fiber_g: number | null
   sugar_g: number | null
   sodium_mg: number | null
+  category: string | null
 }
 
 interface PortionRow {
@@ -29,7 +31,7 @@ export async function resolveSelection(nutritionDb: DbAdapter, candidate: Scored
 
   const [food, defaultPortion, anyPortion] = await Promise.all([
     nutritionDb.get<FoodRow>(
-      'SELECT protein_g, fat_g, carb_g, fiber_g, sugar_g, sodium_mg FROM foods WHERE id = ?',
+      'SELECT protein_g, fat_g, carb_g, fiber_g, sugar_g, sodium_mg, category FROM foods WHERE id = ?',
       [foodId],
     ),
     nutritionDb.get<PortionRow>(
@@ -41,6 +43,8 @@ export async function resolveSelection(nutritionDb: DbAdapter, candidate: Scored
       [foodId],
     ),
   ])
+
+  const { isWholeFood, isAnimalBased } = classifyCategory(food?.category)
 
   return {
     foodId,
@@ -58,5 +62,7 @@ export async function resolveSelection(nutritionDb: DbAdapter, candidate: Scored
       sugar_g: food?.sugar_g ?? null,
       sodium_mg: food?.sodium_mg ?? null,
     },
+    isWholeFood,
+    isAnimalBased,
   }
 }

@@ -37,6 +37,15 @@ export const INTERRUPTION_THRESHOLD = 45
 
 export interface SelectionInput {
   item: Item
+  /**
+   * The IngredientRow this question is about — carried through onto every
+   * SelectedQuestion it produces so an answer can be applied to the RIGHT
+   * row. Without this, a multi-item meal's chips had no way to say which
+   * ingredient they were even asking about, and answering most of them
+   * (anything past portion_eaten and cooking_oil, which happen to have their
+   * own row-finding workarounds) was a silent no-op.
+   */
+  rowId?: string | undefined
   /** Model reasons UNIONED with structural ones. Never replaced. */
   extraReasons?: readonly string[] | undefined
   /** Attributes this user has already answered 3+ times — these go silent. */
@@ -58,6 +67,8 @@ export interface SelectedQuestion {
   state: 'highlighted' | 'pre_answered'
   appliedDefault: string | null
   disclosure: string
+  /** The ingredient row this question is about, when it is about one specific row. */
+  rowId?: string | undefined
 }
 
 /**
@@ -117,7 +128,15 @@ export function selectQuestions(input: SelectionInput): SelectedQuestion[] {
     if (q.id === 'portion_eaten') isApplicable = item.legible_label_text == null
     else if (q.id === 'servings_consumed') isApplicable = input.multiServingPackage === true
     else if (q.id === 'gram_disagreement') isApplicable = input.gramDisagreement != null
-    else {
+    else if (q.id === 'regular_or_diet') {
+      // 'identity_ambiguous' is a generic "not sure what this food is" reason —
+      // the model sets it for an egg it can't size up just as readily as for a
+      // soda it can't read the label on. Bound to the reason alone, this asked
+      // "Regular or diet?" on every kind of identity uncertainty, eggs included.
+      // The question only means anything for an actual soda-type drink.
+      isApplicable = item.is_beverage && item.beverage_category === 'soda_juice_other' &&
+        q.reasons.includes(item.uncertainty_reason)
+    } else {
       isApplicable =
         structuralIds.has(q.id) ||
         q.reasons.includes(item.uncertainty_reason) ||
@@ -159,13 +178,46 @@ export function selectQuestions(input: SelectionInput): SelectedQuestion[] {
       state: ask ? 'highlighted' : 'pre_answered',
       appliedDefault: ask ? null : q.silentDefault,
       disclosure: q.defaultDisclosure,
+      rowId: input.rowId,
     }
   })
 }
 
+/**
+ * Questions that describe the WHOLE PLATE, not one ingredient on it.
+ * `selectQuestions` runs once per item, so without this a three-ingredient meal
+ * would surface "Did you eat all of this, or some of it?" three times — once
+ * per ingredient that happened to qualify — instead of the single, obviously
+ * meal-wide question it actually is. Every other question in the bank (cooking
+ * oil, sauce type, milk type...) genuinely can differ ingredient to ingredient,
+ * so only these two are collapsed.
+ */
+const MEAL_SCOPED_QUESTION_IDS = new Set(['portion_eaten', 'servings_consumed'])
+
+/** Keeps one instance of each meal-scoped question — the highlighted one if any, else the highest-value one. */
+function dedupeMealScoped(qs: readonly SelectedQuestion[]): SelectedQuestion[] {
+  const kept = new Map<string, SelectedQuestion>()
+  const order: string[] = []
+  const rest: SelectedQuestion[] = []
+
+  for (const q of qs) {
+    if (!MEAL_SCOPED_QUESTION_IDS.has(q.question.id)) {
+      rest.push(q)
+      continue
+    }
+    const existing = kept.get(q.question.id)
+    if (!existing) order.push(q.question.id)
+    if (!existing || (q.state === 'highlighted' && existing.state !== 'highlighted') || q.expectedValue > existing.expectedValue) {
+      kept.set(q.question.id, q)
+    }
+  }
+
+  return [...order.map((id) => kept.get(id)!), ...rest]
+}
+
 /** Highlighted questions across a whole meal, respecting the global cap. */
 export function selectMealQuestions(items: readonly SelectionInput[]): SelectedQuestion[] {
-  const all = items.flatMap((i) => selectQuestions(i))
+  const all = dedupeMealScoped(items.flatMap((i) => selectQuestions(i)))
   const highlighted = all.filter((q) => q.state === 'highlighted')
 
   if (highlighted.length <= MAX_QUESTIONS) return all

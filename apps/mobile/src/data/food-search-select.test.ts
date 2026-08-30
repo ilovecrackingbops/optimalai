@@ -92,16 +92,26 @@ describe('resolveSelection + logManualFood — what a tap on a Food Database row
     expect(selection.grams).toBe(50) // the seeded is_fndds_default row, not the 100 g fallback
   })
 
-  it('scales the per-100g snapshot to the logged grams — 50 g of a 143 kcal/100g egg is ~71.5 kcal', async () => {
+  it('stores the snapshot UNSCALED, per-100g — every reader multiplies by grams/100 itself', async () => {
+    // Regression for a real bug: this used to pre-scale to the logged grams
+    // (50 g -> ~71.5 kcal stored) while `grams` was ALSO stored as 50. Every
+    // reader (dayTotals, mealDetail) then multiplies snap_energy_kcal by
+    // grams/100 AGAIN, so the true display value was scaled twice — and
+    // editing grams afterward (a normal correction) multiplied the ALREADY-
+    // wrong number by a new factor instead of recomputing from the true
+    // per-100g rate. Concretely: "100 g of bread" logged from a food whose
+    // FNDDS default portion is 1 oz (28 g) showed 79 kcal instead of ~272.
     const selection = await resolveSelection(nutritionDb, candidateFor('1', 'Egg, whole, raw, fresh', 143))
     const mealId = await logManualFood(userDb, selection, NOW)
 
-    const item = await userDb.get<{ snap_energy_kcal: number; snap_protein_g: number }>(
-      'SELECT snap_energy_kcal, snap_protein_g FROM log_items WHERE meal_id = ?',
+    const item = await userDb.get<{ snap_energy_kcal: number; snap_protein_g: number; grams: number }>(
+      'SELECT snap_energy_kcal, snap_protein_g, grams FROM log_items WHERE meal_id = ?',
       [mealId],
     )
-    expect(item?.snap_energy_kcal).toBeCloseTo(71.5, 1)
-    expect(item?.snap_protein_g).toBeCloseTo(6.3, 1)
+    expect(item?.snap_energy_kcal).toBeCloseTo(143, 5)
+    expect(item?.snap_protein_g).toBeCloseTo(12.6, 5)
+    // The invariant every reader relies on: displayed = snapshot * grams / 100.
+    expect((item!.snap_energy_kcal * item!.grams) / 100).toBeCloseTo(71.5, 1)
   })
 
   it('falls back to 100 g when the corpus row has no portion data at all', async () => {

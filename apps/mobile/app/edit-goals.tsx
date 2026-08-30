@@ -1,6 +1,6 @@
 import { router } from 'expo-router'
 import { useEffect, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { reconcileFromMacros } from '@nutai/totals'
 import { currentGoal, overrideTargets, type CurrentGoal } from '../src/data/repo'
@@ -72,7 +72,10 @@ export default function EditGoals() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg, paddingTop: insets.top + space.lg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg, paddingTop: insets.top + space.lg }}
+    >
       <View style={styles.head}>
         <Text style={[type.title, { color: theme.text }]}>Nutrition goals</Text>
         <Pressable onPress={() => router.back()} hitSlop={space.md}>
@@ -123,7 +126,7 @@ export default function EditGoals() {
           <Text style={[type.bodyStrong, { color: theme.bg, fontSize: 18 }]}>Save</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
