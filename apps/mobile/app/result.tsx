@@ -1,9 +1,11 @@
-import { router } from 'expo-router'
+import { router, useLocalSearchParams } from 'expo-router'
 import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Image,
   Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,7 +20,7 @@ import { healthScore } from '@nutai/totals'
 import { ConfidenceChip, ConfidenceReasons } from '../src/components/ConfidenceChip'
 import { Icon, type IconName } from '../src/components/Icon'
 import { openNutritionDb } from '../src/db/expo-adapter'
-import { logMeal } from '../src/data/repo'
+import { atDate, logMeal } from '../src/data/repo'
 import { aggregateAdherence, fetchClassifications, type AdherenceShares, type FoodClassification } from '../src/data/food-category'
 import { fixScan, lookupOther, retryScan } from '../src/scan/orchestrator'
 import {
@@ -49,6 +51,10 @@ import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
 export default function Result() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  // Set when this scan started from Home's "Log meal" sheet for a day other
+  // than today — the meal logs to THAT date instead of the moment "Log it" is
+  // tapped, which can be well after the scan for a photo/text log started.
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
   const phase = useScan()
   const [expandedBand, setExpandedBand] = useState(false)
   const [logging, setLogging] = useState(false)
@@ -153,7 +159,19 @@ export default function Result() {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingTop: insets.top + space.lg, paddingBottom: 120 }}>
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ padding: space.lg, paddingTop: insets.top + space.lg, paddingBottom: 120 }}
+      >
+        {forDate ? (
+          <View style={[styles.forDateBanner, { backgroundColor: theme.bgSunken }]}>
+            <Icon name="calendar" size={16} color={theme.protein} />
+            <Text style={[type.label, { color: theme.protein }]}>
+              Logging for {new Date(atDate(forDate)).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}, not today
+            </Text>
+          </View>
+        ) : null}
+
         <Text style={[type.title, { color: theme.text }]}>
           {result.items[0]?.row.displayName ?? 'Your meal'}
         </Text>
@@ -279,7 +297,7 @@ export default function Result() {
               setLogging(true)
               void (async () => {
                 try {
-                  await logMeal(result, phase.meta, phase.photoUri, Date.now())
+                  await logMeal(result, phase.meta, phase.photoUri, forDate ? atDate(forDate) : Date.now())
                   reset()
                   router.dismissAll()
                 } catch {
@@ -295,7 +313,10 @@ export default function Result() {
       </View>
 
       {fixOpen ? (
-        <View style={[styles.fixOverlay, { backgroundColor: theme.bg, paddingTop: insets.top + space.xl }]}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[styles.fixOverlay, { backgroundColor: theme.bg, paddingTop: insets.top + space.xl }]}
+        >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
             <Icon name="pencil" size={20} color={theme.text} />
             <Text style={[type.title, { color: theme.text }]}>Fix result</Text>
@@ -348,7 +369,7 @@ export default function Result() {
           >
             <Text style={[type.body, { color: theme.textMuted }]}>Cancel</Text>
           </Pressable>
-        </View>
+        </KeyboardAvoidingView>
       ) : null}
     </View>
   )
@@ -568,6 +589,14 @@ function StatsPager({
 
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl },
+  forDateBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    padding: space.md,
+    borderRadius: radius.md,
+    marginBottom: space.lg,
+  },
   statsPage: { flexDirection: 'row', gap: space.md },
   dots: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: space.md },
   dot: { width: 6, height: 6, borderRadius: 3 },

@@ -1,6 +1,6 @@
-import { router } from 'expo-router'
+import { router, useLocalSearchParams } from 'expo-router'
 import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from '../src/components/Icon'
 import { startTextScan } from '../src/scan/orchestrator'
@@ -21,19 +21,30 @@ import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
 export default function LogFoodText() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
-  const [text, setText] = useState('')
+  const { forDate, prefill } = useLocalSearchParams<{ forDate?: string; prefill?: string }>()
+  // Seeds the box when arriving from a Food Database search that came up
+  // empty or imperfect — the words already typed there are a head start on
+  // the description, not a reason to make someone retype them.
+  const [text, setText] = useState(prefill ?? '')
   const [submitted, setSubmitted] = useState(false)
 
   function submit() {
     const desc = text.trim()
     if (!desc || submitted) return
     setSubmitted(true)
-    router.replace('/result')
+    if (forDate) {
+      router.replace({ pathname: '/result', params: { forDate } } as never)
+    } else {
+      router.replace('/result')
+    }
     void startTextScan(desc)
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg }}
+    >
       <View style={[styles.header, { paddingTop: insets.top + space.sm }]}>
         <Pressable
           accessibilityRole="button"
@@ -47,7 +58,12 @@ export default function LogFoodText() {
         <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space.lg }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <TextInput
           autoFocus
           multiline
@@ -83,7 +99,7 @@ export default function LogFoodText() {
           </Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
@@ -123,6 +139,6 @@ const styles = StyleSheet.create({
     marginTop: space.lg,
   },
   example: { marginTop: space.lg, padding: space.lg, borderRadius: radius.lg },
-  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg },
+  dock: { padding: space.lg },
   cta: { height: 60, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
 })

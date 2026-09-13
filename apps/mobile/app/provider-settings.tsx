@@ -1,6 +1,6 @@
 import { router, useFocusEffect } from 'expo-router'
 import { useCallback, useState } from 'react'
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { PROVIDER_MODELS, providersByPrice, type ProviderId } from '@nutai/prompt'
 import { CredentialForm, PROVIDER_NAME } from '../src/components/CredentialForm'
@@ -37,7 +37,10 @@ export default function ProviderSettings() {
   useFocusEffect(refresh)
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg }}
+    >
       <View style={[styles.head, { paddingTop: insets.top + space.sm }]}>
         <Text style={[type.title, { color: theme.text }]}>AI provider</Text>
         <Pressable onPress={() => router.back()} hitSlop={space.md}>
@@ -45,7 +48,11 @@ export default function ProviderSettings() {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 120 }}>
+      <ScrollView
+        contentContainerStyle={{ padding: space.lg, paddingBottom: 120 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.chipRow}>
           {providersByPrice().map((p) => (
             <Pressable
@@ -164,7 +171,7 @@ export default function ProviderSettings() {
           </>
         ) : null}
       </ScrollView>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 

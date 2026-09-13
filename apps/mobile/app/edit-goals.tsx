@@ -7,6 +7,9 @@ import { currentGoal, overrideTargets, type CurrentGoal } from '../src/data/repo
 import { useTheme } from '../src/theme/ThemeProvider'
 import { radius, space, type } from '../src/theme/tokens'
 
+type MacroUnit = 'g' | '%'
+const KCAL_PER_G = { protein: 4, fat: 9, carbs: 4 } as const
+
 /**
  * Edit nutrition goals.
  *
@@ -20,6 +23,14 @@ import { radius, space, type } from '../src/theme/tokens'
  *   SAVING TURNS THE ADAPTIVE LOOP OFF. Silently overwriting a target someone
  *   deliberately typed is the fastest way to lose their trust in every other
  *   number in the app.
+ *
+ * Protein and fat can be typed as grams OR as % of calories — a g/% segmented
+ * toggle, not two parallel fields to keep in sync. Grams stay the one thing
+ * actually saved (`overrideTargets` takes grams, same as `goals.protein_g` in
+ * the DB); % is purely a display/input transform of the same number, computed
+ * live from whatever calories currently reads, so typing "30" in % mode and
+ * then changing calories updates the resulting grams instead of silently
+ * leaving a stale gram figure that no longer means 30%.
  */
 export default function EditGoals() {
   const theme = useTheme()
@@ -27,8 +38,10 @@ export default function EditGoals() {
 
   const [base, setBase] = useState<CurrentGoal | null>(null)
   const [kcal, setKcal] = useState('')
-  const [protein, setProtein] = useState('')
-  const [fat, setFat] = useState('')
+  const [proteinUnit, setProteinUnit] = useState<MacroUnit>('g')
+  const [fatUnit, setFatUnit] = useState<MacroUnit>('g')
+  const [proteinText, setProteinText] = useState('')
+  const [fatText, setFatText] = useState('')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -37,8 +50,8 @@ export default function EditGoals() {
       if (!alive || !g) return
       setBase(g)
       setKcal(String(Math.round(g.targetKcal)))
-      setProtein(String(Math.round(g.protein_g)))
-      setFat(String(Math.round(g.fat_g)))
+      setProteinText(String(Math.round(g.protein_g)))
+      setFatText(String(Math.round(g.fat_g)))
     })
     return () => {
       alive = false
@@ -51,11 +64,33 @@ export default function EditGoals() {
   }
 
   const kcalV = n(kcal)
-  const proteinV = n(protein)
-  const fatV = n(fat)
+
+  /** Grams are the one true value regardless of which unit is showing. */
+  function gramsOf(text: string, unit: MacroUnit, kcalPerG: number): number {
+    const v = n(text)
+    return unit === 'g' ? v : kcalV > 0 ? (v / 100) * kcalV / kcalPerG : 0
+  }
+  function pctOf(grams: number, kcalPerG: number): number {
+    return kcalV > 0 ? (grams * kcalPerG * 100) / kcalV : 0
+  }
+
+  const proteinV = gramsOf(proteinText, proteinUnit, KCAL_PER_G.protein)
+  const fatV = gramsOf(fatText, fatUnit, KCAL_PER_G.fat)
   // The single derived value.
   const carbsV = Math.max(0, (kcalV - 4 * proteinV - 9 * fatV) / 4)
   const impossible = kcalV > 0 && 4 * proteinV + 9 * fatV > kcalV
+
+  function switchUnit(macro: 'protein' | 'fat', next: MacroUnit) {
+    if (macro === 'protein') {
+      if (next === proteinUnit) return
+      setProteinText(next === '%' ? String(Math.round(pctOf(proteinV, KCAL_PER_G.protein))) : String(Math.round(proteinV)))
+      setProteinUnit(next)
+    } else {
+      if (next === fatUnit) return
+      setFatText(next === '%' ? String(Math.round(pctOf(fatV, KCAL_PER_G.fat))) : String(Math.round(fatV)))
+      setFatUnit(next)
+    }
+  }
 
   async function save() {
     if (!base || saving || kcalV <= 0 || impossible) return
@@ -83,15 +118,42 @@ export default function EditGoals() {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Field label="Calories" unit="kcal" value={kcal} onChange={setKcal} />
-        <Field label="Protein" unit="g" value={protein} onChange={setProtein} />
-        <Field label="Fat" unit="g" value={fat} onChange={setFat} />
+
+        <MacroField
+          label="Protein"
+          text={proteinText}
+          onChangeText={setProteinText}
+          unit={proteinUnit}
+          onChangeUnit={(u) => switchUnit('protein', u)}
+          grams={proteinV}
+          pct={pctOf(proteinV, KCAL_PER_G.protein)}
+        />
+        <MacroField
+          label="Fat"
+          text={fatText}
+          onChangeText={setFatText}
+          unit={fatUnit}
+          onChangeUnit={(u) => switchUnit('fat', u)}
+          grams={fatV}
+          pct={pctOf(fatV, KCAL_PER_G.fat)}
+        />
 
         <View style={[styles.derived, { backgroundColor: theme.bgSunken }]}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
             <Text style={[type.body, { color: theme.textMuted }]}>Carbs</Text>
-            <Text style={[styles.big, { color: theme.text }]}>{Math.round(carbsV)} g</Text>
+            <Text style={[styles.big, { color: theme.text }]}>
+              {Math.round(carbsV)} g
+              <Text style={[type.caption, { color: theme.textMuted }]}>
+                {'  '}· {Math.round(pctOf(carbsV, KCAL_PER_G.carbs))}%
+              </Text>
+            </Text>
           </View>
           <Text style={[type.caption, { color: theme.textMuted, marginTop: space.xs, lineHeight: 18 }]}>
             Carbs are always the remainder, so your four numbers can never disagree with each other.
@@ -156,6 +218,56 @@ function Field({
   )
 }
 
+/** A gram/percent field with a small toggle and the other unit shown as a live cross-reference. */
+function MacroField({
+  label, text, onChangeText, unit, onChangeUnit, grams, pct,
+}: {
+  label: string
+  text: string
+  onChangeText: (v: string) => void
+  unit: MacroUnit
+  onChangeUnit: (u: MacroUnit) => void
+  grams: number
+  pct: number
+}) {
+  const theme = useTheme()
+  return (
+    <View style={{ marginBottom: space.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: space.xs }}>
+        <Text style={[type.label, { color: theme.textMuted }]}>{label}</Text>
+        <View style={[styles.segment, { backgroundColor: theme.bgSunken }]}>
+          {(['g', '%'] as const).map((u) => (
+            <Pressable
+              key={u}
+              accessibilityRole="button"
+              accessibilityState={{ selected: unit === u }}
+              onPress={() => onChangeUnit(u)}
+              style={[styles.segItem, unit === u && { backgroundColor: theme.bgElevated }]}
+            >
+              <Text style={[type.caption, { color: unit === u ? theme.text : theme.textMuted, fontWeight: unit === u ? '700' : '400' }]}>
+                {u}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+      <View style={[styles.field, { backgroundColor: theme.bgSunken, borderColor: theme.border }]}>
+        <TextInput
+          keyboardType="number-pad"
+          value={text}
+          onChangeText={onChangeText}
+          accessibilityLabel={`${label} in ${unit === 'g' ? 'grams' : 'percent of calories'}`}
+          style={[styles.input, { color: theme.text }]}
+        />
+        <Text style={[type.body, { color: theme.textMuted }]}>{unit === 'g' ? 'g' : '%'}</Text>
+      </View>
+      <Text style={[type.caption, { color: theme.textFaint, marginTop: 4 }]}>
+        {unit === 'g' ? `${Math.round(pct)}% of calories` : `${Math.round(grams)} g`}
+      </Text>
+    </View>
+  )
+}
+
 const styles = StyleSheet.create({
   head: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -167,10 +279,12 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth, minHeight: 56,
   },
   input: { flex: 1, fontSize: 22, fontWeight: '700', paddingVertical: space.md },
+  segment: { flexDirection: 'row', borderRadius: radius.pill, padding: 2 },
+  segItem: { paddingHorizontal: space.md, paddingVertical: 4, borderRadius: radius.pill },
   derived: { padding: space.lg, borderRadius: radius.lg },
   big: { fontSize: 24, fontWeight: '800', letterSpacing: -0.6 },
   warn: { marginTop: space.md, padding: space.lg, borderRadius: radius.lg },
   note: { marginTop: space.md, padding: space.lg, borderRadius: radius.lg },
-  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg },
+  dock: { padding: space.lg },
   cta: { height: 60, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
 })

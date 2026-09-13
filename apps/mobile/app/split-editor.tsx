@@ -1,6 +1,6 @@
 import { router, useLocalSearchParams } from 'expo-router'
 import { useEffect, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from '../src/components/Icon'
 import { saveSplit, splitDetail, type SplitExerciseInput } from '../src/data/repo'
@@ -65,7 +65,10 @@ export default function SplitEditor() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg }}
+    >
       <View style={[styles.header, { paddingTop: insets.top + space.sm }]}>
         <Pressable accessibilityRole="button" onPress={() => router.back()} hitSlop={space.md}>
           <Text style={[type.body, { color: theme.textMuted }]}>Cancel</Text>
@@ -76,7 +79,12 @@ export default function SplitEditor() {
         <View style={{ width: 60 }} />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Text style={[type.label, { color: theme.textMuted }]}>Split name</Text>
         <TextInput
           autoFocus={splitId == null}
@@ -146,7 +154,7 @@ export default function SplitEditor() {
           <Text style={[type.bodyStrong, { color: theme.bg, fontSize: 18 }]}>{saving ? 'Saving…' : 'Save split'}</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
@@ -237,6 +245,6 @@ const styles = StyleSheet.create({
     borderStyle: 'dashed',
     minHeight: MIN_TAP_TARGET,
   },
-  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg },
+  dock: { padding: space.lg },
   cta: { height: 60, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
 })

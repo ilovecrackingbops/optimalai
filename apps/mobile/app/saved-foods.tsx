@@ -1,4 +1,4 @@
-import { router, useFocusEffect } from 'expo-router'
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router'
 import { useCallback, useState } from 'react'
 import {
   ActivityIndicator,
@@ -14,7 +14,7 @@ import {
   View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { deleteSavedMeal, logSavedMeal, saveCustomRecipe, savedMeals, type SavedMealListEntry } from '../src/data/repo'
+import { atDate, deleteSavedMeal, logSavedMeal, saveCustomRecipe, savedMeals, type SavedMealListEntry } from '../src/data/repo'
 import { Icon } from '../src/components/Icon'
 import { useTheme } from '../src/theme/ThemeProvider'
 import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
@@ -32,6 +32,7 @@ import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
 export default function SavedFoods() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
   const [meals, setMeals] = useState<SavedMealListEntry[]>([])
   const [loggingId, setLoggingId] = useState<number | null>(null)
 
@@ -57,7 +58,7 @@ export default function SavedFoods() {
     if (loggingId != null) return
     setLoggingId(id)
     try {
-      await logSavedMeal(id, Date.now())
+      await logSavedMeal(id, forDate ? atDate(forDate) : Date.now())
       router.back()
     } finally {
       setLoggingId(null)
@@ -110,6 +111,14 @@ export default function SavedFoods() {
       <View style={styles.head}>
         <Text style={[type.title, { color: theme.text }]}>Saved foods</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Scheduled meals"
+            onPress={() => router.push('/scheduled-meals' as never)}
+            hitSlop={space.sm}
+          >
+            <Icon name="calendar" size={22} color={theme.text} />
+          </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="New recipe" onPress={openCompose} hitSlop={space.sm}>
             <Icon name="plus" size={22} color={theme.text} />
           </Pressable>
@@ -118,6 +127,15 @@ export default function SavedFoods() {
           </Pressable>
         </View>
       </View>
+      {forDate ? (
+        <Text style={[type.micro, { color: theme.protein, paddingHorizontal: space.lg, marginTop: space.xs }]}>
+          Tapping a meal logs it for {new Date(atDate(forDate)).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}, not today.
+        </Text>
+      ) : (
+        <Text style={[type.micro, { color: theme.textFaint, paddingHorizontal: space.lg, marginTop: space.xs }]}>
+          Tap the calendar to schedule a saved meal for a future day, or every week.
+        </Text>
+      )}
 
       <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}>
         {meals.length === 0 ? (
@@ -178,7 +196,12 @@ export default function SavedFoods() {
             </Pressable>
           </View>
 
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: space.xl }} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingBottom: space.xl }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+          >
             <Text style={[type.label, { color: theme.textMuted, marginTop: space.xl }]}>Name</Text>
             <TextInput
               autoFocus

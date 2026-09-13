@@ -92,7 +92,11 @@ export default function MealDetail() {
         <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}>
+      <ScrollView
+        contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         {meal.photoUri ? <Image source={{ uri: meal.photoUri }} style={styles.photo} /> : null}
 
         <Text style={[type.hero, { color: theme.text, marginTop: space.lg, fontSize: 40 }]}>

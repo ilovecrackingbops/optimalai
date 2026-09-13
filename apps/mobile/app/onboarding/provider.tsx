@@ -24,7 +24,7 @@ import { radius, space, type } from '../../src/theme/tokens'
  */
 
 const LABELS: Record<ProviderId, { name: string; icon: IconName; note: string }> = {
-  openai: { name: 'OpenAI', icon: 'scan', note: 'GPT-4o and 4o-mini' },
+  openai: { name: 'OpenAI', icon: 'scan', note: 'GPT-4o mini and GPT-5.6' },
   google: { name: 'Google', icon: 'scan', note: 'Gemini — paid tier only' },
   anthropic: { name: 'Anthropic', icon: 'scan', note: 'Claude Haiku and Sonnet' },
 }

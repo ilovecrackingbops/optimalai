@@ -8,6 +8,7 @@ import {
   updateAdaptiveTdee,
   type ActivityLevel,
   type Goal,
+  type MacroSplitPct,
   type MacroTargets,
   type Sex,
   type WeightPoint,
@@ -15,13 +16,13 @@ import {
 import Storage from 'expo-sqlite/kv-store'
 import { ONBOARDING_DONE_KEY } from '../onboarding/done-key'
 import { EXPORT_TABLES, WIPE_ONLY_TABLES } from './backup-core'
-import { localDate, slotFor } from './date-utils'
+import { atDate, countStreak, localDate, slotFor } from './date-utils'
 import { clearCredential } from '../inference/credentials'
 import { openNutritionDb, openUserDb } from '../db/expo-adapter'
 import { classifyCategory, type FoodClassification } from './food-category'
 import { exerciseKcal } from '../exercise/met'
 
-export { localDate, slotFor }
+export { atDate, countStreak, localDate, slotFor }
 
 /**
  * The read/write layer over `user.db`.
@@ -176,11 +177,77 @@ export async function overrideTargets(
   )
 }
 
+const MACRO_SPLIT_PROTEIN_KEY = 'macroSplit.proteinPct'
+const MACRO_SPLIT_FAT_KEY = 'macroSplit.fatPct'
+
+/**
+ * The persistent macro-ratio preference set on Profile, or null when unset —
+ * meaning every future macro computation falls back to `@nutai/goals`'
+ * weight-based default. Unlike `overrideTargets`'s one-time hand-typed
+ * numbers, this is a RULE: `setGoalTarget` and the adaptive loop both read it
+ * on every future recompute, so it keeps applying itself as the calorie
+ * target moves, without ever touching the adaptive flag.
+ */
+export async function macroSplitPct(): Promise<MacroSplitPct | null> {
+  const [p, f] = await Promise.all([setting(MACRO_SPLIT_PROTEIN_KEY, ''), setting(MACRO_SPLIT_FAT_KEY, '')])
+  const proteinPct = Number.parseFloat(p)
+  const fatPct = Number.parseFloat(f)
+  if (!Number.isFinite(proteinPct) || !Number.isFinite(fatPct)) return null
+  if (proteinPct <= 0 || fatPct <= 0 || proteinPct + fatPct >= 100) return null
+  return { proteinPct, fatPct }
+}
+
+/**
+ * Set (`split`) or clear (`null`) the macro-ratio preference, and re-derive
+ * today's goal's macros against it immediately — so turning this on is
+ * visible right away rather than waiting for the next target-weight change or
+ * adaptive tick. Only protein_g/fat_g/carbs_g change: target_kcal, bmr, tdee,
+ * and the adaptive flag are all carried over from the current goal untouched,
+ * because this is a change to how calories get SPLIT, not to the target
+ * itself.
+ */
+export async function setMacroSplitPct(split: MacroSplitPct | null, now: number): Promise<void> {
+  await putSetting(MACRO_SPLIT_PROTEIN_KEY, split ? String(split.proteinPct) : '')
+  await putSetting(MACRO_SPLIT_FAT_KEY, split ? String(split.fatPct) : '')
+
+  const base = await currentGoal()
+  if (!base) return
+
+  const points = await weightHistory()
+  const weightKg = points[points.length - 1]?.weightKg ?? 80
+  const macros = computeMacros(base.targetKcal, weightKg, base.goalType, split ?? undefined)
+  const rate = Number.parseFloat(await setting('goal.rateLbPerWeek', ''))
+
+  const h = await db()
+  await h.run(
+    `INSERT INTO goals
+       (effective_from, goal_type, rate_lb_per_week, target_kcal, target_raw_kcal,
+        floor_applied, protein_g, fat_g, carbs_g, bmr, tdee, adaptive)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      now,
+      base.goalType,
+      base.goalType === 'maintain' || !Number.isFinite(rate) ? null : rate,
+      base.targetKcal,
+      base.targetRawKcal,
+      base.floorApplied ? 1 : 0,
+      macros.protein_g,
+      macros.fat_g,
+      macros.carbs_g,
+      base.bmr,
+      base.tdee,
+      base.adaptive ? 1 : 0,
+    ],
+  )
+}
+
 export interface BodyProfile {
   sex: Sex
   ageYears: number
   heightCm: number
   activity: ActivityLevel
+  /** From the hand-typed "Body fat %" field on Progress. Never inferred. */
+  bodyFatFraction?: number | undefined
 }
 
 /** Body inputs the goals formula needs, read from onboarding's `user_profile` row. */
@@ -199,11 +266,21 @@ export async function bodyProfile(now: number): Promise<BodyProfile | null> {
       ? Math.max(13, Math.min(100, new Date(now).getUTCFullYear() - row.birth_year))
       : 30
 
+  // Same field the FFMI card on Progress reads/writes — a plain settings
+  // value rather than a user_profile column, since it's optional and has no
+  // other structure to it. Out-of-range junk is treated as absent rather than
+  // fed into Katch-McArdle, matching the same guard the Progress screen uses
+  // before it will even show an FFMI.
+  const bfStr = await setting('bodyFatPct', '')
+  const bf = Number.parseFloat(bfStr)
+  const bodyFatFraction = Number.isFinite(bf) && bf > 0 && bf < 70 ? bf / 100 : undefined
+
   return {
     sex: (row.sex as Sex | null) ?? 'unspecified',
     ageYears,
     heightCm: row.height_cm,
     activity: (row.activity_level as ActivityLevel | null) ?? 'sedentary',
+    bodyFatFraction,
   }
 }
 
@@ -235,10 +312,12 @@ export async function setGoalTarget(desiredWeightKg: number, goalType: Goal, rat
     heightCm: profile.heightCm,
     ageYears: profile.ageYears,
     activity: profile.activity,
+    bodyFatFraction: profile.bodyFatFraction,
     goal: goalType,
     rateLbPerWeek: rate,
   })
-  const macros = computeMacros(target.target, currentKg, goalType)
+  const split = await macroSplitPct()
+  const macros = computeMacros(target.target, currentKg, goalType, split ?? undefined)
 
   const h = await db()
   await h.run(
@@ -289,6 +368,13 @@ export interface DayTotals {
   mealCount: number
   distinctSlots: number
   pendingCount: number
+}
+
+/** Every distinct local date with at least one meal row — the input `countStreak` needs. */
+export async function loggedDates(): Promise<string[]> {
+  const h = await db()
+  const rows = await h.all<{ local_date: string }>('SELECT DISTINCT local_date FROM meals ORDER BY local_date DESC')
+  return rows.map((r) => r.local_date)
 }
 
 /**
@@ -542,6 +628,120 @@ export async function mealsForDate(date: string): Promise<MealListEntry[]> {
   }))
 }
 
+/**
+ * How many complete meals a day already has — cheap enough to call once per
+ * day chip when building a "copy from…" picker, without paging in every
+ * ingredient row the way `mealsForDate` would.
+ */
+export async function mealCountForDate(date: string): Promise<number> {
+  const h = await db()
+  const row = await h.get<{ c: number }>(
+    `SELECT COUNT(*) c FROM meals WHERE local_date = ? AND analysis_status IN ('complete','manual')`,
+    [date],
+  )
+  return row?.c ?? 0
+}
+
+/**
+ * Clone every complete meal logged on `fromDate` onto `toDate`, snapshot rows
+ * and all — an explicit, user-initiated "copy yesterday's meals" action, not
+ * a suggestion the app makes on its own, so it runs immediately with no
+ * confirmation prompt, the same as relogging a saved meal. Photos are not
+ * copied: a camera temp URI from another day is not guaranteed to still
+ * resolve, same reasoning as the backup-restore path.
+ *
+ * Returns the number of meals copied (0 if `fromDate` had nothing to copy).
+ */
+export async function copyMealsFromDate(fromDate: string, toDate: string, now: number): Promise<number> {
+  const h = await db()
+  const sourceMeals = await h.all<{ id: number; meal_slot: string | null; portion_eaten_fraction: number }>(
+    `SELECT id, meal_slot, portion_eaten_fraction FROM meals
+     WHERE local_date = ? AND analysis_status IN ('complete','manual')
+     ORDER BY logged_at`,
+    [fromDate],
+  )
+  if (sourceMeals.length === 0) return 0
+
+  await h.transaction(async (tx) => {
+    for (const meal of sourceMeals) {
+      const items = await tx.all<{
+        matched_food_id: number | null
+        matched_food_source: string
+        raw_model_label: string | null
+        display_name: string
+        grams: number
+        gram_pathway: string
+        portion_source: string
+        snap_energy_kcal: number | null
+        snap_protein_g: number | null
+        snap_fat_g: number | null
+        snap_carb_g: number | null
+        snap_fiber_g: number | null
+        snap_sugar_g: number | null
+        snap_sodium_mg: number | null
+        is_whole_food: number | null
+        is_animal_based: number | null
+        is_estimate: number
+        band_half_pct: number | null
+        assumptions_json: string | null
+        sort_order: number
+      }>(
+        `SELECT matched_food_id, matched_food_source, raw_model_label, display_name, grams,
+                gram_pathway, portion_source, snap_energy_kcal, snap_protein_g, snap_fat_g,
+                snap_carb_g, snap_fiber_g, snap_sugar_g, snap_sodium_mg,
+                is_whole_food, is_animal_based, is_estimate, band_half_pct, assumptions_json, sort_order
+         FROM log_items WHERE meal_id = ? ORDER BY sort_order`,
+        [meal.id],
+      )
+
+      const inserted = await tx.run(
+        `INSERT INTO meals (logged_at, local_date, meal_slot, portion_eaten_fraction, analysis_status, created_at)
+         VALUES (?,?,?,?,'complete',?)`,
+        [now, toDate, meal.meal_slot, meal.portion_eaten_fraction, now],
+      )
+      const newMealId = Number(inserted.lastInsertRowId)
+
+      for (const item of items) {
+        await tx.run(
+          `INSERT INTO log_items (meal_id, matched_food_id, matched_food_source, raw_model_label,
+                                  display_name, grams, gram_pathway, portion_source,
+                                  snap_energy_kcal, snap_protein_g, snap_fat_g, snap_carb_g,
+                                  snap_fiber_g, snap_sugar_g, snap_sodium_mg,
+                                  is_whole_food, is_animal_based, is_estimate, macros_user_edited,
+                                  band_half_pct, assumptions_json, sort_order, logged_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`,
+          [
+            newMealId,
+            item.matched_food_id,
+            item.matched_food_source,
+            item.raw_model_label,
+            item.display_name,
+            item.grams,
+            item.gram_pathway,
+            item.portion_source,
+            item.snap_energy_kcal,
+            item.snap_protein_g,
+            item.snap_fat_g,
+            item.snap_carb_g,
+            item.snap_fiber_g,
+            item.snap_sugar_g,
+            item.snap_sodium_mg,
+            item.is_whole_food,
+            item.is_animal_based,
+            item.is_estimate,
+            item.band_half_pct,
+            item.assumptions_json,
+            item.sort_order,
+            now,
+          ],
+        )
+      }
+    }
+  })
+
+  return sourceMeals.length
+}
+
 export interface MealDetailItem {
   id: number
   displayName: string
@@ -634,15 +834,44 @@ export interface ExerciseListEntry {
   name: string
   kcal: number
   loggedAt: number
+  /**
+   * True for a strength-training session — either the simple intensity-based
+   * "Weight lifting" log (log-exercise.tsx's IntensityScreen) or a logged
+   * split, which carries itemized sets/reps/weight in exercise_entry_items.
+   * There is no dedicated exercise "kind" column, so both signals are needed:
+   * a split is named after the split itself (e.g. "Upper — 12 sets"), not
+   * "Weight lifting", so a name check alone would miss it.
+   */
+  isWeightlifting: boolean
 }
 
+/**
+ * Weightlifting pinned first, most-recent-first within each group. A stable
+ * sort on "is this weightlifting" preserves the query's own logged_at DESC
+ * order inside each group — it only ever reorders lifting ABOVE everything
+ * else, never reshuffles same-kind entries against each other.
+ */
 export async function exerciseEntries(date: string): Promise<ExerciseListEntry[]> {
   const h = await db()
-  const rows = await h.all<{ id: number; name: string; kcal: number; logged_at: number }>(
-    'SELECT id, name, kcal, logged_at FROM exercise_entries WHERE local_date = ? ORDER BY logged_at DESC',
+  const rows = await h.all<{ id: number; name: string; kcal: number; logged_at: number; has_items: number }>(
+    `SELECT e.id, e.name, e.kcal, e.logged_at,
+            EXISTS(SELECT 1 FROM exercise_entry_items i WHERE i.exercise_entry_id = e.id) AS has_items
+     FROM exercise_entries e
+     WHERE e.local_date = ?
+     ORDER BY e.logged_at DESC`,
     [date],
   )
-  return rows.map((r) => ({ id: r.id, name: r.name, kcal: r.kcal, loggedAt: r.logged_at }))
+  const entries = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    kcal: r.kcal,
+    loggedAt: r.logged_at,
+    isWeightlifting: r.has_items === 1 || r.name.startsWith('Weight lifting —'),
+  }))
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => (b.e.isWeightlifting ? 1 : 0) - (a.e.isWeightlifting ? 1 : 0) || a.i - b.i)
+    .map(({ e }) => e)
 }
 
 export async function exerciseTotals(date: string): Promise<{ kcal: number; count: number }> {
@@ -661,17 +890,82 @@ export async function deleteExerciseEntry(id: number): Promise<void> {
 
 export async function exerciseEntry(id: number): Promise<ExerciseListEntry | null> {
   const h = await db()
-  const r = await h.get<{ id: number; name: string; kcal: number; logged_at: number }>(
-    'SELECT id, name, kcal, logged_at FROM exercise_entries WHERE id = ?',
+  const r = await h.get<{ id: number; name: string; kcal: number; logged_at: number; has_items: number }>(
+    `SELECT e.id, e.name, e.kcal, e.logged_at,
+            EXISTS(SELECT 1 FROM exercise_entry_items i WHERE i.exercise_entry_id = e.id) AS has_items
+     FROM exercise_entries e
+     WHERE e.id = ?`,
     [id],
   )
-  return r ? { id: r.id, name: r.name, kcal: r.kcal, loggedAt: r.logged_at } : null
+  return r
+    ? {
+        id: r.id,
+        name: r.name,
+        kcal: r.kcal,
+        loggedAt: r.logged_at,
+        isWeightlifting: r.has_items === 1 || r.name.startsWith('Weight lifting —'),
+      }
+    : null
 }
 
 /** Editable after the fact, same as a logged meal — "recorded exactly as entered" cuts both ways. */
 export async function updateExerciseEntry(id: number, patch: { name: string; kcal: number }): Promise<void> {
   const h = await db()
   await h.run('UPDATE exercise_entries SET name = ?, kcal = ? WHERE id = ?', [patch.name, patch.kcal, id])
+}
+
+// ---------------------------------------------------------------------------
+// Strength history — per-exercise weight over time, from exercise_entry_items.
+// Only logged splits carry these rows (a plain Run/Manual/Describe entry has
+// no per-exercise breakdown), so this is scoped to exactly the workouts that
+// actually recorded a weight per exercise.
+// ---------------------------------------------------------------------------
+
+export interface StrengthPoint {
+  localDate: string
+  loggedAt: number
+  weightLb: number | null
+  reps: number
+  sets: number
+}
+
+/**
+ * Every exercise name ever logged with a weight, most-recently-used first —
+ * that ordering puts what someone is CURRENTLY training at the top of the
+ * picker instead of an alphabetical list dominated by exercises they tried
+ * once, months ago, and never repeated.
+ */
+export async function strengthExerciseNames(): Promise<string[]> {
+  const h = await db()
+  const rows = await h.all<{ name: string }>(
+    `SELECT i.name
+     FROM exercise_entry_items i
+     JOIN exercise_entries e ON e.id = i.exercise_entry_id
+     WHERE i.weight_lb IS NOT NULL
+     GROUP BY i.name COLLATE NOCASE
+     ORDER BY MAX(e.logged_at) DESC`,
+  )
+  return rows.map((r) => r.name)
+}
+
+/** One point per session that exercise was trained, oldest first (chart reads left-to-right). */
+export async function strengthHistory(exerciseName: string): Promise<StrengthPoint[]> {
+  const h = await db()
+  const rows = await h.all<{ local_date: string; logged_at: number; weight_lb: number | null; reps: number; sets: number }>(
+    `SELECT e.local_date, e.logged_at, i.weight_lb, i.reps, i.sets
+     FROM exercise_entry_items i
+     JOIN exercise_entries e ON e.id = i.exercise_entry_id
+     WHERE i.name = ? COLLATE NOCASE AND i.weight_lb IS NOT NULL
+     ORDER BY e.logged_at ASC`,
+    [exerciseName],
+  )
+  return rows.map((r) => ({
+    localDate: r.local_date,
+    loggedAt: r.logged_at,
+    weightLb: r.weight_lb,
+    reps: r.reps,
+    sets: r.sets,
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1438,177 @@ export async function logSavedMeal(savedMealId: number, now: number): Promise<nu
 }
 
 // ---------------------------------------------------------------------------
+// Scheduled meals — a saved meal earmarked for a future day, realized into a
+// real logged meal the next time that day's data is read. There is no push
+// notification here: this app has none of that infrastructure, so "auto-log"
+// means the meal is already sitting in the log by the time the day is opened,
+// exactly as if it had been logged by hand — never a chip to tap, never a
+// prompt to confirm, matching the app's stance against interrupting the user
+// after the fact for anything that can just be applied.
+// ---------------------------------------------------------------------------
+
+/** Sunday=0..Saturday=6, matching `Date#getDay()` and the home screen's day strip. */
+export const WEEKDAY_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+export type PlannedMealTarget = { localDate: string; weekday?: undefined } | { localDate?: undefined; weekday: number }
+
+export interface PlannedMealListEntry {
+  id: number
+  savedMealId: number
+  name: string
+  kcal: number
+  mealSlot: string | null
+  localDate: string | null
+  weekday: number | null
+}
+
+/** Earmark a saved meal for one future date, or every week on a given weekday. */
+export async function schedulePlannedMeal(
+  savedMealId: number,
+  target: PlannedMealTarget,
+  mealSlot: string | null,
+  now: number,
+): Promise<void> {
+  const h = await db()
+  await h.run(
+    `INSERT INTO planned_meals (saved_meal_id, meal_slot, local_date, weekday, created_at)
+     VALUES (?,?,?,?,?)`,
+    [savedMealId, mealSlot, target.localDate ?? null, target.weekday ?? null, now],
+  )
+}
+
+/** Every scheduled meal, one-off dates first (soonest first), then weekly plans. */
+export async function plannedMeals(): Promise<PlannedMealListEntry[]> {
+  const h = await db()
+  const rows = await h.all<{
+    id: number
+    saved_meal_id: number
+    meal_slot: string | null
+    local_date: string | null
+    weekday: number | null
+    name: string
+    items_json: string
+  }>(
+    `SELECT pm.id, pm.saved_meal_id, pm.meal_slot, pm.local_date, pm.weekday, sm.name, sm.items_json
+     FROM planned_meals pm
+     JOIN saved_meals sm ON sm.id = pm.saved_meal_id
+     ORDER BY (pm.local_date IS NULL), pm.local_date, pm.weekday`,
+  )
+  return rows.map((r) => {
+    const items = JSON.parse(r.items_json) as SavedMealItemSnapshot[]
+    const kcal = items.reduce((a, i) => a + (i.nutrientSnapshot.kcal * i.grams) / 100, 0)
+    return {
+      id: r.id,
+      savedMealId: r.saved_meal_id,
+      name: r.name,
+      kcal,
+      mealSlot: r.meal_slot,
+      localDate: r.local_date,
+      weekday: r.weekday,
+    }
+  })
+}
+
+export async function deletePlannedMeal(id: number): Promise<void> {
+  const h = await db()
+  await h.run('DELETE FROM planned_meals WHERE id = ?', [id])
+}
+
+/**
+ * Realize any plan due on `date` that has not already fired for that date —
+ * idempotent, via the `planned_meal_log` dedupe ledger, so calling this every
+ * time a day's data loads can never double-log a recurring plan. Refuses a
+ * date later than `now`'s local date: a plan should never be pre-materialized
+ * before the day actually arrives.
+ *
+ * A one-off plan is deleted after it fires — its `local_date` can never match
+ * again — while a recurring (`weekday`) plan stays, ready for next week.
+ */
+export async function materializePlannedMeals(date: string, now: number): Promise<number> {
+  if (date > localDate(now)) return 0
+
+  const h = await db()
+  const weekday = new Date(`${date}T00:00:00`).getDay()
+
+  const due = await h.all<{
+    id: number
+    saved_meal_id: number
+    meal_slot: string | null
+    local_date: string | null
+    items_json: string
+  }>(
+    `SELECT pm.id, pm.saved_meal_id, pm.meal_slot, pm.local_date, sm.items_json
+     FROM planned_meals pm
+     JOIN saved_meals sm ON sm.id = pm.saved_meal_id
+     WHERE (pm.local_date = ? OR pm.weekday = ?)
+       AND NOT EXISTS (
+         SELECT 1 FROM planned_meal_log l WHERE l.planned_meal_id = pm.id AND l.local_date = ?
+       )`,
+    [date, weekday, date],
+  )
+  if (due.length === 0) return 0
+
+  await h.transaction(async (tx) => {
+    for (const plan of due) {
+      const items = JSON.parse(plan.items_json) as SavedMealItemSnapshot[]
+
+      const meal = await tx.run(
+        `INSERT INTO meals (logged_at, local_date, meal_slot, portion_eaten_fraction, analysis_status, created_at)
+         VALUES (?,?,?,1.0,'complete',?)`,
+        [now, date, plan.meal_slot, now],
+      )
+      const mealId = Number(meal.lastInsertRowId)
+
+      let sort = 0
+      for (const item of items) {
+        const n = item.nutrientSnapshot
+        await tx.run(
+          `INSERT INTO log_items (meal_id, matched_food_id, matched_food_source, display_name, grams,
+                                  gram_pathway, portion_source, snap_energy_kcal, snap_protein_g, snap_fat_g,
+                                  snap_carb_g, snap_fiber_g, snap_sugar_g, snap_sodium_mg,
+                                  is_whole_food, is_animal_based,
+                                  is_estimate, macros_user_edited, sort_order, logged_at)
+           VALUES (?,?,?,?,?,'saved_meal','saved_meal',?,?,?,?,?,?,?,?,?,?,0,?,?)`,
+          [
+            mealId,
+            item.matchedFoodId,
+            item.matchedFoodId != null ? 'corpus' : 'estimate',
+            item.displayName,
+            item.grams,
+            n.kcal,
+            n.protein_g,
+            n.fat_g,
+            n.carbs_g,
+            n.fiber_g,
+            n.sugar_g,
+            n.sodium_mg,
+            item.isWholeFood == null ? null : item.isWholeFood ? 1 : 0,
+            item.isAnimalBased == null ? null : item.isAnimalBased ? 1 : 0,
+            item.isEstimate ? 1 : 0,
+            sort++,
+            now,
+          ],
+        )
+      }
+
+      await tx.run(
+        `INSERT INTO planned_meal_log (planned_meal_id, local_date, meal_id) VALUES (?,?,?)`,
+        [plan.id, date, mealId],
+      )
+      await tx.run('UPDATE saved_meals SET use_count = use_count + 1, last_used_at = ? WHERE id = ?', [
+        now,
+        plan.saved_meal_id,
+      ])
+      if (plan.local_date != null) {
+        await tx.run('DELETE FROM planned_meals WHERE id = ?', [plan.id])
+      }
+    }
+  })
+
+  return due.length
+}
+
+// ---------------------------------------------------------------------------
 // Weight
 // ---------------------------------------------------------------------------
 
@@ -1209,8 +1674,12 @@ export async function runAdaptive(now: number): Promise<AdaptiveOutcome> {
   if (slope == null) return { ran: false, reason: 'Not enough spread in your weigh-ins yet.' }
 
   const h = await db()
+  // A meal logged AHEAD of time for a future day is a plan, not yet observed
+  // behavior — it must never leak into the intake average this trend reads,
+  // or pre-logging tomorrow's dinner would silently skew today's target.
   const days = await h.all<{ local_date: string }>(
-    'SELECT DISTINCT local_date FROM meals ORDER BY local_date DESC LIMIT 21',
+    'SELECT DISTINCT local_date FROM meals WHERE local_date <= ? ORDER BY local_date DESC LIMIT 21',
+    [localDate(now)],
   )
 
   let sum = 0
@@ -1253,10 +1722,12 @@ export async function runAdaptive(now: number): Promise<AdaptiveOutcome> {
   }
 
   // Macros re-derive from the new target so protein tracks the body, not the
-  // budget, and carbs stay the single derived remainder.
+  // budget, and carbs stay the single derived remainder — or, if the user set
+  // a macro-ratio preference on Profile, that split is what re-applies here.
   const profile = await h.get<{ height_cm: number }>('SELECT height_cm FROM user_profile WHERE id = 1')
   const latestKg = points[points.length - 1]?.weightKg ?? 80
-  const macros = computeMacros(result.newTdee, latestKg, goal.goalType)
+  const split = await macroSplitPct()
+  const macros = computeMacros(result.newTdee, latestKg, goal.goalType, split ?? undefined)
 
   await h.run(
     `INSERT INTO goals

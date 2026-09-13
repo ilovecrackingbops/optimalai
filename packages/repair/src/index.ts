@@ -10,30 +10,28 @@ export * from './question-bank.js'
 /**
  * The interruption rule.
  *
- * SPEC-accuracy-engine.md §8.1.
+ * Product decision, superseding the old expected-value threshold in
+ * SPEC-accuracy-engine.md §8.1: this app never interrupts with a clarifying
+ * chip about the FOOD ITSELF — what kind of milk, how fatty a cut, regular or
+ * diet, how much oil — no matter how large that ambiguity's calorie swing.
+ * The user says what they mean in the description (or the photo shows it),
+ * or corrects the row afterward; "leave it to my notes, not a prompt" was the
+ * explicit ask. The only chips ever highlighted are `portion_eaten` and
+ * `servings_consumed` (rank 1-2, multiplicative) — how much of the food was
+ * actually eaten is not something a description or a photo can answer at
+ * all, unlike everything else in the bank.
  *
- *   expected_value(Q) = P(assumption_wrong) x expected_kcal_swing(Q) x severity
- *
- *   ASK Q as a highlighted chip iff  expected_value(Q) > INTERRUPTION_THRESHOLD
+ *   ASK Q as a highlighted chip iff  Q is multiplicative
  *                                    AND selected_this_scan < MAX_QUESTIONS
  *   ELSE apply the silent default and render it as a visibly-editable,
  *        clearly-labeled, PRE-ANSWERED chip. Never a hidden assumption.
  *
- * THE SINGLE MOST IMPORTANT PROPERTY OF THE ENTIRE DESIGN is the asymmetry this
- * produces: a typical home-cooked mixed-dish photo surfaces 1-2 questions, while a
- * banana or a plain grilled chicken breast surfaces ZERO and logs in one tap. That
- * asymmetry is what stops the feature becoming a 30-second chore, which is the
- * failure mode that kills food logging apps.
- */
-
-/**
- * Both constants are INFERRED, not measured. No study surfaced a user-tolerance
- * curve for question count. They live here, together, as named dials so that "how
- * chatty is the app" is one auditable knob rather than scattered heuristics — and
- * they are explicitly A/B-testable from day one.
+ * `expectedValue` is still computed for every question — it orders the
+ * pre-answered disclosures and, for a multi-item meal, decides which of
+ * several multiplicative questions wins the MAX_QUESTIONS slots — it just no
+ * longer gates whether a non-multiplicative question can ever interrupt.
  */
 export const MAX_QUESTIONS = 2
-export const INTERRUPTION_THRESHOLD = 45
 
 export interface SelectionInput {
   item: Item
@@ -147,12 +145,18 @@ export function selectQuestions(input: SelectionInput): SelectedQuestion[] {
     applicable.push({ q, ev: expectedValue(q, item, structuralIds.has(q.id), severity), structural: structuralIds.has(q.id) })
   }
 
-  // META-RULE: ranks 1-2 are closer to "always ask when applicable" than genuinely
-  // threshold-gated. Their swing is multiplicative and their resolution is cheap
-  // AND CERTAIN — they are factual questions, not perceptual ones. Ranks 3-11 are
-  // what the expected-value computation should genuinely gate, because asking
-  // about oil on a plain grilled breast with no visible sauce is a wasted
-  // interruption with near-zero expected value.
+  // META-RULE: ranks 1-2 (portion_eaten, servings_consumed) are the only
+  // questions ever highlighted as an interactive chip — they ask how much of
+  // the food was actually eaten, which cannot be inferred from a description
+  // or a photo at all, factual and fully resolvable with certainty. Ranks
+  // 3-11 are perceptual ambiguity about the FOOD ITSELF (what kind of milk,
+  // how fatty a cut, regular or diet, cooked with how much oil) — an explicit
+  // product decision is to never interrupt for these, no matter how large
+  // their expected value: the user types what they mean into the
+  // description, or edits the row after, rather than being stopped and asked.
+  // The silent default is still ALWAYS applied and disclosed (see the
+  // bank-wide rule at the top of question-bank.ts) — only the interruption
+  // is gone, not the transparency.
   applicable.sort((a, b) => {
     if (a.q.multiplicative !== b.q.multiplicative) return a.q.multiplicative ? -1 : 1
     return b.ev - a.ev
@@ -160,8 +164,7 @@ export function selectQuestions(input: SelectionInput): SelectedQuestion[] {
 
   let highlighted = 0
   return applicable.map(({ q, ev }) => {
-    const clears = q.multiplicative || ev > INTERRUPTION_THRESHOLD
-    const ask = clears && highlighted < MAX_QUESTIONS
+    const ask = q.multiplicative && highlighted < MAX_QUESTIONS
     if (ask) highlighted++
 
     let text = q.text

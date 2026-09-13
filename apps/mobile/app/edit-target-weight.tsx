@@ -132,7 +132,13 @@ export default function EditTargetWeight() {
   // with nothing written yet.
   const preview = useMemo(() => {
     if (profile == null || currentKg == null) return null
-    const body: BodyInputs = { sex: profile.sex, weightKg: currentKg, heightCm: profile.heightCm, ageYears: profile.ageYears }
+    const body: BodyInputs = {
+      sex: profile.sex,
+      weightKg: currentKg,
+      heightCm: profile.heightCm,
+      ageYears: profile.ageYears,
+      bodyFatFraction: profile.bodyFatFraction,
+    }
     return computeCalorieTarget({
       ...body,
       activity: profile.activity,
@@ -249,6 +255,12 @@ export default function EditTargetWeight() {
               {w}
             </Text>
           ))}
+          {profile?.bodyFatFraction != null ? (
+            <Text style={[type.caption, { color: theme.textFaint, marginTop: space.xs, lineHeight: 18 }]}>
+              Using the body fat % you entered on Progress for a sharper BMR (Katch-McArdle) instead
+              of the usual weight-only estimate.
+            </Text>
+          ) : null}
         </View>
 
         {error ? (

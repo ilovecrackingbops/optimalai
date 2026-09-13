@@ -6,7 +6,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { ProviderId } from '@nutai/prompt'
 import { availability, requestPermissions } from '../../src/health/healthkit'
 import { exportAndShareBackup, finishRestore, importBackup, pickBackupFile } from '../../src/data/backup'
-import { currentGoal, putSetting, resetEverything, setting, weightHistory, type CurrentGoal } from '../../src/data/repo'
+import type { MacroSplitPct } from '@nutai/goals'
+import {
+  currentGoal,
+  macroSplitPct,
+  putSetting,
+  resetEverything,
+  setting,
+  weightHistory,
+  type CurrentGoal,
+} from '../../src/data/repo'
 import { formatRatePerWeek, formatWeightKg, getUnitPref, setUnitPref, type UnitPref } from '../../src/data/units'
 import { loadCredential, maskCredential } from '../../src/inference/credentials'
 import { PROVIDER_NAME } from '../../src/components/CredentialForm'
@@ -43,12 +52,13 @@ export default function Profile() {
   const [targetWeightKg, setTargetWeightKg] = useState<number | null>(null)
   const [rateLbPerWeek, setRateLbPerWeek] = useState<number | null>(null)
   const [stepGoal, setStepGoal] = useState(10_000)
+  const [macroSplit, setMacroSplit] = useState<MacroSplitPct | null>(null)
 
   useFocusEffect(
     useCallback(() => {
       let alive = true
       void (async () => {
-        const [g, avail, d, p, units, weights, stepGoalStr, desiredWeightStr, rateStr] = await Promise.all([
+        const [g, avail, d, p, units, weights, stepGoalStr, desiredWeightStr, rateStr, split] = await Promise.all([
           currentGoal(),
           availability(),
           setting('diet.style', 'balanced'),
@@ -58,9 +68,11 @@ export default function Profile() {
           setting('stepGoal', '10000'),
           setting('goal.desiredWeightKg', ''),
           setting('goal.rateLbPerWeek', ''),
+          macroSplitPct(),
         ])
         if (!alive) return
         setGoal(g)
+        setMacroSplit(split)
         setDiet(d)
         setUnitPrefState(units)
         setLatestWeightKg(weights[weights.length - 1]?.weightKg ?? null)
@@ -214,6 +226,11 @@ export default function Profile() {
           label="Protein / Carbs / Fat"
           value={goal ? `${Math.round(goal.protein_g)} / ${Math.round(goal.carbs_g)} / ${Math.round(goal.fat_g)} g` : '—'}
           onPress={() => router.push('/edit-goals' as never)}
+        />
+        <Row
+          label="Macro ratio"
+          value={macroSplit ? `${Math.round(macroSplit.proteinPct)}/${Math.round(macroSplit.fatPct)}/${Math.round(100 - macroSplit.proteinPct - macroSplit.fatPct)} %` : 'Automatic'}
+          onPress={() => router.push('/edit-macro-ratio' as never)}
         />
         <Row
           label="Log weight"

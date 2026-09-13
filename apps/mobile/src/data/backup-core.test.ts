@@ -160,8 +160,9 @@ describe('backup round trip', () => {
 
   it('the wipe set exactly covers what a factory reset wipes', () => {
     // resetEverything() derives from these same lists; this pins the union.
-    // 22 = 19 + workout_splits + workout_split_exercises + exercise_entry_items.
-    expect(EXPORT_TABLES.length + WIPE_ONLY_TABLES.length).toBe(22)
+    // 24 = 19 + workout_splits + workout_split_exercises + exercise_entry_items
+    //    + planned_meals + planned_meal_log.
+    expect(EXPORT_TABLES.length + WIPE_ONLY_TABLES.length).toBe(24)
   })
 
   it('describes a backup in human terms for the restore preview', async () => {

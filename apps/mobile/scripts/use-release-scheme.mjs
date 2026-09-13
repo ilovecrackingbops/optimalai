@@ -16,19 +16,48 @@
  * Switch back any time via Product > Scheme > Edit Scheme > Run.
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCHEME = join(HERE, '../ios/NutAI.xcodeproj/xcshareddata/xcschemes/NutAI.xcscheme')
+const IOS_DIR = join(HERE, '../ios')
+
+/**
+ * The Xcode project name tracks `name` in app.config.ts (Expo prebuild derives
+ * it from the display name, not from BUNDLE_ID/SLUG/SCHEME, which is what
+ * app.config.ts's own comment says stays fixed across a rename). Hardcoding
+ * "NutAI" here silently broke the day the app became "Optimal AI" — prebuild
+ * now regenerates `ios/OptimalAI.xcodeproj`, not `ios/NutAI.xcodeproj`, and
+ * this script had quietly done nothing since, with a success-shaped "no iOS
+ * project yet" message masking the real problem. Deriving the name from
+ * whatever `.xcodeproj` prebuild actually created survives the next rename
+ * too.
+ */
+async function findXcodeProjectName() {
+  let entries
+  try {
+    entries = await readdir(IOS_DIR)
+  } catch {
+    return null
+  }
+  const project = entries.find((e) => e.endsWith('.xcodeproj'))
+  return project ? project.replace(/\.xcodeproj$/, '') : null
+}
 
 async function main() {
+  const name = await findXcodeProjectName()
+  if (!name) {
+    console.log('use-release-scheme: no iOS project yet — run `expo prebuild` first.')
+    return
+  }
+  const SCHEME = join(IOS_DIR, `${name}.xcodeproj/xcshareddata/xcschemes/${name}.xcscheme`)
+
   let xml
   try {
     xml = await readFile(SCHEME, 'utf8')
   } catch {
-    console.log('use-release-scheme: no iOS project yet — run `expo prebuild` first.')
+    console.log(`use-release-scheme: found ${name}.xcodeproj but no matching scheme file — run \`expo prebuild\` first.`)
     return
   }
 

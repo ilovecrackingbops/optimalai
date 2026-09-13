@@ -1,9 +1,9 @@
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { Image } from 'expo-image'
 import * as ImagePicker from 'expo-image-picker'
-import { router } from 'expo-router'
+import { router, useLocalSearchParams } from 'expo-router'
 import { useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon, type IconName } from '../src/components/Icon'
 import { startBarcodeScan, startLabelScan, startReceiptScan, startScan } from '../src/scan/orchestrator'
@@ -38,6 +38,10 @@ const MODES: Array<{ id: CameraMode; label: string; icon: IconName }> = [
 export default function Camera() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  // Set only when this screen was opened from Home's "Log meal" sheet for a
+  // day other than today — every hand-off to /result carries it along so the
+  // eventual log lands on THAT day instead of whenever the scan finishes.
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
   const [permission, requestPermission] = useCameraPermissions()
   const cameraRef = useRef<CameraView>(null)
   const [busy, setBusy] = useState(false)
@@ -48,6 +52,15 @@ export default function Camera() {
   // it is handed to the model. Every other mode hands off immediately.
   const [describeUri, setDescribeUri] = useState<string | null>(null)
   const [note, setNote] = useState('')
+
+  /** Every hand-off to the result screen goes through here so `forDate` is never forgotten on one path. */
+  function goToResult() {
+    if (forDate) {
+      router.replace({ pathname: '/result', params: { forDate } } as never)
+    } else {
+      router.replace('/result')
+    }
+  }
 
   if (!permission) return <View style={{ flex: 1, backgroundColor: '#000' }} />
 
@@ -79,12 +92,12 @@ export default function Camera() {
     setPhase({ kind: 'captured', photoUri: uri })
 
     if (mode === 'label') {
-      router.replace('/result')
+      goToResult()
       void startLabelScan(uri)
       return
     }
     if (mode === 'receipt') {
-      router.replace('/result')
+      goToResult()
       void startReceiptScan(uri)
       return
     }
@@ -129,14 +142,14 @@ export default function Camera() {
     // Navigate NOW. Preprocessing, the model call and the pipeline all run
     // behind the result screen's progress states — the user never stares at
     // a frozen screen wondering whether the shutter worked.
-    router.replace('/result')
+    goToResult()
     void startScan(uri, trimmed || undefined)
   }
 
   function onBarcode(data: string) {
     if (barcodeFired.current || !data) return
     barcodeFired.current = true
-    router.replace('/result')
+    goToResult()
     void startBarcodeScan(data)
   }
 
@@ -208,7 +221,10 @@ export default function Camera() {
       </Pressable>
 
       {describeUri ? (
-        <View style={[styles.describeOverlay, { paddingTop: insets.top + space.xl, paddingBottom: Math.max(insets.bottom, space.xl) }]}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[styles.describeOverlay, { paddingTop: insets.top + space.xl, paddingBottom: Math.max(insets.bottom, space.xl) }]}
+        >
           <Image source={{ uri: describeUri }} style={styles.describePhoto} />
           <Text style={[type.heading, { color: '#fff', marginTop: space.xl }]}>Add a note?</Text>
           <Text style={[type.caption, styles.hint, { paddingVertical: space.xs }]}>
@@ -239,7 +255,7 @@ export default function Camera() {
           >
             <Text style={[type.body, { color: 'rgba(255,255,255,0.8)' }]}>Skip</Text>
           </Pressable>
-        </View>
+        </KeyboardAvoidingView>
       ) : null}
     </View>
   )

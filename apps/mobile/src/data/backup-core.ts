@@ -40,6 +40,7 @@ export const EXPORT_TABLES = [
   'user_foods',
   'user_containers',
   'saved_meals',
+  'planned_meals',
   'personal_gram_priors',
   'food_attribute_memory',
   'weight_entries',
@@ -52,6 +53,12 @@ export const EXPORT_TABLES = [
   'meals',
   'log_items',
   'scan_cost_ledger',
+  // Depends on BOTH planned_meals and meals, so it must insert after each —
+  // last in the list, same reasoning as log_items depending on meals. Without
+  // this row restoring, a recurring plan whose weekday matches an already-
+  // restored past date would re-fire and duplicate that day's meal the next
+  // time it's viewed, since the dedupe ledger would look empty.
+  'planned_meal_log',
 ] as const
 
 /**

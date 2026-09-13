@@ -44,11 +44,14 @@ export interface ProviderModel {
  */
 export const PROVIDER_MODELS: Record<ProviderId, ProviderModel[]> = {
   openai: [
+    // Still the cheapest vision-capable OpenAI model on a per-token basis,
+    // even after the GPT-5.6 launch below (July 2026) — kept as the default
+    // for exactly the reason this catalogue stays price-sorted at all.
     { id: 'gpt-4o-mini', label: 'GPT-4o mini', inputPerMTok: 0.15, outputPerMTok: 0.6, approxScanCostUsd: 0.0009 },
-    { id: 'gpt-4o', label: 'GPT-4o', inputPerMTok: 2.5, outputPerMTok: 10, approxScanCostUsd: 0.012 },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', inputPerMTok: 4, outputPerMTok: 20, approxScanCostUsd: 0.022 },
   ],
   google: [
-    { id: 'gemini-2.0-flash-lite', label: 'Gemini Flash-Lite', inputPerMTok: 0.075, outputPerMTok: 0.3, approxScanCostUsd: 0.0024 },
+    { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite', inputPerMTok: 0.1, outputPerMTok: 0.4, approxScanCostUsd: 0.0032 },
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', inputPerMTok: 1.25, outputPerMTok: 10, approxScanCostUsd: 0.02 },
   ],
   anthropic: [

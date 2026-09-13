@@ -1,11 +1,25 @@
 import { router, useFocusEffect } from 'expo-router'
-import { useCallback, useMemo, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Svg, { Circle, Line as SvgLine, Path, Rect, Text as SvgText } from 'react-native-svg'
 import { Image } from 'expo-image'
-import { bmi, computeTrend, trendSlopeLbPerWeek, type TrendPoint, type WeightPoint } from '@nutai/goals'
-import { currentGoal, db, physiqueHistory, setting, weightHistory, type CurrentGoal, type PhysiqueEntry } from '../../src/data/repo'
+import { bmi, ffmi, computeTrend, trendSlopeLbPerWeek, type TrendPoint, type WeightPoint } from '@nutai/goals'
+import {
+  countStreak,
+  currentGoal,
+  db,
+  loggedDates,
+  physiqueHistory,
+  putSetting,
+  setting,
+  strengthExerciseNames,
+  strengthHistory,
+  weightHistory,
+  type CurrentGoal,
+  type PhysiqueEntry,
+  type StrengthPoint,
+} from '../../src/data/repo'
 import { displayWeight, getUnitPref, LB_PER_KG, weightUnitLabel, type UnitPref } from '../../src/data/units'
 import { Icon } from '../../src/components/Icon'
 import { useTheme } from '../../src/theme/ThemeProvider'
@@ -32,35 +46,61 @@ export default function Progress() {
   const [window, setWindow] = useState<(typeof WINDOWS)[number]['key']>('90D')
   const [physique, setPhysique] = useState<PhysiqueEntry[]>([])
   const [unitPref, setUnitPref] = useState<UnitPref>('imperial')
+  const [exerciseNames, setExerciseNames] = useState<string[]>([])
+  const [selectedExercise, setSelectedExercise] = useState<string | null>(null)
+  const [strengthPoints, setStrengthPoints] = useState<StrengthPoint[]>([])
+  const [bodyFatPctText, setBodyFatPctText] = useState('')
 
   useFocusEffect(
     useCallback(() => {
       let alive = true
       void (async () => {
         const h = await db()
-        const [pts, g, target, profile, days, phys, units] = await Promise.all([
+        const [pts, g, target, profile, days, phys, units, names, bodyFatPctStr] = await Promise.all([
           weightHistory(),
           currentGoal(),
           setting('goal.desiredWeightKg', ''),
           h.get<{ height_cm: number }>('SELECT height_cm FROM user_profile WHERE id = 1'),
-          h.all<{ local_date: string }>('SELECT DISTINCT local_date FROM meals ORDER BY local_date DESC'),
+          loggedDates(),
           physiqueHistory(),
           getUnitPref(),
+          strengthExerciseNames(),
+          setting('bodyFatPct', ''),
         ])
         if (!alive) return
         setPoints(pts)
         setGoal(g)
         setGoalKg(target ? Number(target) : null)
         setHeightCm(profile?.height_cm ?? null)
-        setStreak(countStreak(days.map((d) => d.local_date)))
+        setStreak(countStreak(days))
         setPhysique(phys)
         setUnitPref(units)
+        setExerciseNames(names)
+        setBodyFatPctText(bodyFatPctStr)
+        // Keep the current selection if it is still valid (still-trained
+        // exercise, screen just refocused); otherwise default to the most
+        // recently trained one — never silently reset a deliberate pick.
+        setSelectedExercise((cur) => (cur && names.includes(cur) ? cur : (names[0] ?? null)))
       })()
       return () => {
         alive = false
       }
     }, []),
   )
+
+  useEffect(() => {
+    if (!selectedExercise) {
+      setStrengthPoints([])
+      return
+    }
+    let alive = true
+    void strengthHistory(selectedExercise).then((pts) => {
+      if (alive) setStrengthPoints(pts)
+    })
+    return () => {
+      alive = false
+    }
+  }, [selectedExercise])
 
   const trend = useMemo(() => computeTrend(points), [points])
   const raw = trend.filter((p) => p.rawKg != null)
@@ -83,6 +123,24 @@ export default function Progress() {
   }, [trend, window])
 
   const bodyBmi = currentKg != null && heightCm != null ? bmi(currentKg, heightCm) : null
+
+  const bodyFatPct = Number.parseFloat(bodyFatPctText)
+  const bodyFatPctValid = Number.isFinite(bodyFatPct) && bodyFatPct > 0 && bodyFatPct < 70
+  const bodyFfmi =
+    bodyFatPctValid && currentKg != null && heightCm != null ? ffmi(currentKg, heightCm, bodyFatPct) : null
+
+  function saveBodyFatPct(text: string) {
+    setBodyFatPctText(text)
+    const v = Number.parseFloat(text)
+    if (text.trim() === '') {
+      void putSetting('bodyFatPct', '')
+    } else if (Number.isFinite(v) && v > 0 && v < 70) {
+      void putSetting('bodyFatPct', text.trim())
+    }
+    // An out-of-range or unparseable value is left uncommitted rather than
+    // silently clamped or discarded — the text box just won't show an FFMI
+    // until it reads back something plausible.
+  }
 
   return (
     <ScrollView
@@ -173,6 +231,71 @@ export default function Progress() {
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>
+        <Text style={[type.heading, { color: theme.text }]}>Strength</Text>
+
+        {exerciseNames.length === 0 ? (
+          <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md }]}>
+            No weighted sets logged yet. Log a split under Exercise → My splits with a weight per
+            exercise, and it shows up here.
+          </Text>
+        ) : (
+          <>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: space.sm, marginTop: space.md }}
+            >
+              {exerciseNames.map((name) => {
+                const active = name === selectedExercise
+                return (
+                  <Pressable
+                    key={name}
+                    accessibilityRole="button"
+                    onPress={() => setSelectedExercise(name)}
+                    style={[
+                      styles.exChip,
+                      active
+                        ? { backgroundColor: theme.text }
+                        : { backgroundColor: theme.bgElevated },
+                    ]}
+                  >
+                    <Text style={[type.label, { color: active ? theme.bg : theme.text }]}>{name}</Text>
+                  </Pressable>
+                )
+              })}
+            </ScrollView>
+
+            {strengthPoints.length === 0 ? (
+              <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md }]}>
+                No sessions logged for this exercise yet.
+              </Text>
+            ) : (
+              <>
+                <StrengthChart points={strengthPoints} />
+                {(() => {
+                  const first = strengthPoints[0]!
+                  const last = strengthPoints[strengthPoints.length - 1]!
+                  const deltaLb = (last.weightLb ?? 0) - (first.weightLb ?? 0)
+                  return (
+                    <View style={styles.spread}>
+                      <Text style={[type.caption, { color: theme.textMuted }]}>
+                        {strengthPoints.length} session{strengthPoints.length === 1 ? '' : 's'}
+                      </Text>
+                      <Text style={[type.caption, { color: Math.abs(deltaLb) < 0.5 ? theme.textMuted : theme.protein }]}>
+                        {Math.abs(deltaLb) < 0.5
+                          ? 'No change'
+                          : `${deltaLb > 0 ? '+' : ''}${deltaLb.toFixed(0)} lb since first logged`}
+                      </Text>
+                    </View>
+                  )
+                })()}
+              </>
+            )}
+          </>
+        )}
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>
         <Text style={[type.heading, { color: theme.text }]}>Weight changes</Text>
         {CHANGE_WINDOWS.map((d) => (
           <ChangeRow key={d} label={`${d} day`} lbs={changeOver(trend, d)} unitPref={unitPref} />
@@ -210,6 +333,45 @@ export default function Progress() {
             BMI cannot tell muscle from fat and says nothing about an individual's health. It is
             here because it is a common reference point, not because it is a verdict.
           </Text>
+
+          <View style={[styles.divider, { backgroundColor: theme.border }]} />
+
+          <View style={styles.spread}>
+            <Text style={[type.label, { color: theme.textMuted }]}>Body fat %</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <TextInput
+                value={bodyFatPctText}
+                onChangeText={saveBodyFatPct}
+                onEndEditing={() => Keyboard.dismiss()}
+                placeholder="—"
+                placeholderTextColor={theme.textFaint}
+                keyboardType="decimal-pad"
+                maxLength={4}
+                style={[styles.bfInput, { color: theme.text, borderColor: theme.border }]}
+              />
+              <Text style={[type.body, { color: theme.textMuted }]}>%</Text>
+            </View>
+          </View>
+
+          {bodyFfmi != null ? (
+            <>
+              <Text style={[type.heading, { color: theme.text, marginTop: space.lg }]}>Your FFMI</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.md }}>
+                <Text style={[styles.big, { color: theme.text }]}>{bodyFfmi.normalized.toFixed(1)}</Text>
+                <Text style={[type.caption, { color: theme.textMuted }]}>{ffmiBand(bodyFfmi.normalized)}</Text>
+              </View>
+              <Text style={[type.caption, { color: theme.textFaint, marginTop: space.sm, lineHeight: 18 }]}>
+                Fat-free mass index — muscle mass relative to height, the thing BMI can't tell from
+                fat. Normalized to a 5'11" frame so height doesn't skew it. Only as accurate as the
+                body-fat % typed in above, which is never estimated for you. That same % also
+                sharpens your calorie target's BMR (Katch-McArdle instead of a weight-only formula).
+              </Text>
+            </>
+          ) : (
+            <Text style={[type.caption, { color: theme.textMuted, marginTop: space.md }]}>
+              Enter a body fat % to see your FFMI here.
+            </Text>
+          )}
         </View>
       ) : null}
 
@@ -272,27 +434,6 @@ export default function Progress() {
       ) : null}
     </ScrollView>
   )
-}
-
-/** Consecutive logged days ending today, or yesterday if today is still open. */
-function countStreak(dates: string[]): number {
-  if (dates.length === 0) return 0
-  const set = new Set(dates)
-  const day = 86_400_000
-  let n = 0
-  let cursor = Date.now()
-  // A day still in progress must not break a streak that is otherwise intact.
-  if (!set.has(iso(cursor))) cursor -= day
-  while (set.has(iso(cursor))) {
-    n++
-    cursor -= day
-  }
-  return n
-}
-
-function iso(ms: number): string {
-  const d = new Date(ms)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 /** Change over N days, measured on the TREND rather than raw entries. */
@@ -364,11 +505,68 @@ function WeightChart({ trend, unitPref }: { trend: TrendPoint[]; unitPref: UnitP
   )
 }
 
+/**
+ * Weight lifted per session for one exercise — no trend smoothing, unlike
+ * WeightChart. Body weight is noisy day to day and the trend line is the
+ * actual signal; a lifted weight is a deliberate number someone chose to put
+ * on the bar, so the raw session-to-session value already IS the signal.
+ */
+function StrengthChart({ points }: { points: StrengthPoint[] }) {
+  const theme = useTheme()
+  const W = 300
+  const H = 170
+
+  const weights = points.map((p) => p.weightLb ?? 0)
+  const min = Math.min(...weights)
+  const max = Math.max(...weights)
+  const span = max - min < 5 ? 5 : max - min
+  const pad = span * 0.2
+
+  const x = (i: number) => (points.length <= 1 ? W / 2 : (i / (points.length - 1)) * (W - 50) + 40)
+  const y = (lb: number) => H - 24 - ((lb - min + pad) / (span + pad * 2)) * (H - 48)
+
+  const gridVals = [min + span, min + span / 2, min]
+  let d = ''
+  points.forEach((p, i) => {
+    d += `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(p.weightLb ?? 0)} `
+  })
+
+  return (
+    <Svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ marginTop: space.md }}>
+      {gridVals.map((v, i) => (
+        <SvgLine key={i} x1={40} y1={y(v)} x2={W - 10} y2={y(v)} stroke={theme.border} strokeWidth="1" />
+      ))}
+      {gridVals.map((v, i) => (
+        <SvgText key={`t${i}`} x={2} y={y(v) + 4} fontSize="10" fill={theme.textFaint}>
+          {Math.round(v)}
+        </SvgText>
+      ))}
+      <Path d={d} stroke={theme.protein} strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {points.map((p, i) => (
+        <Circle key={i} cx={x(i)} cy={y(p.weightLb ?? 0)} r="3.5" fill={theme.protein} />
+      ))}
+    </Svg>
+  )
+}
+
 function bmiBand(v: number): string {
   if (v < 18.5) return 'Underweight'
   if (v < 25) return 'Healthy'
   if (v < 30) return 'Overweight'
   return 'Obese'
+}
+
+/**
+ * Descriptive only, same spirit as `bmiBand` — no pass/fail, and deliberately
+ * no editorializing about the very top of the range, which usually says more
+ * about the accuracy of a hand-typed body-fat % than about the person.
+ */
+function ffmiBand(v: number): string {
+  if (v < 18) return 'Below average'
+  if (v < 20) return 'Average'
+  if (v < 22) return 'Above average'
+  if (v < 25) return 'High'
+  return 'Very high'
 }
 
 function BmiScale({ value }: { value: number }) {
@@ -411,4 +609,14 @@ const styles = StyleSheet.create({
   line: { width: 18, height: 3, borderRadius: 2 },
   changeRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md },
   physiqueThumb: { width: 56, height: 56, borderRadius: radius.md },
+  exChip: { paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.pill },
+  divider: { height: StyleSheet.hairlineWidth, marginVertical: space.lg },
+  bfInput: {
+    width: 52,
+    textAlign: 'right',
+    fontSize: 17,
+    fontWeight: '700',
+    borderBottomWidth: 1.5,
+    paddingVertical: 2,
+  },
 })

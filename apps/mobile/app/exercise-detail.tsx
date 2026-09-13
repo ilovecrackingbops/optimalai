@@ -111,7 +111,11 @@ export default function ExerciseDetail() {
       </View>
 
       {loaded ? (
-        <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <Text style={[type.label, { color: theme.textMuted }]}>Name</Text>
           <TextInput
             value={name}

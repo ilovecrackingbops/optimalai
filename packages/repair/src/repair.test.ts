@@ -70,11 +70,17 @@ describe('the asymmetry that keeps this from becoming a chore', () => {
     expect(qs.some((q) => q.question.id === 'cooking_oil')).toBe(false)
   })
 
-  it('does ask about oil on a stir-fry', () => {
+  it('flags oil as ambiguous on a stir-fry but never interrupts for it — the default is applied and disclosed instead', () => {
+    // Oil/milk-type/fat-%/diet-or-regular are all perceptual ambiguity about the
+    // food itself, not about how much was eaten — product decision is to never
+    // interrupt for these (see the doc comment on the interruption rule), so
+    // even a clearly-applicable, high-expected-value question like this one
+    // stays pre-answered rather than highlighted.
     const qs = selectQuestions({ item: stirFry })
     const oil = qs.find((q) => q.question.id === 'cooking_oil')
     expect(oil).toBeDefined()
-    expect(oil?.state).toBe('highlighted')
+    expect(oil?.state).toBe('pre_answered')
+    expect(oil?.appliedDefault).toBe(oil?.question.silentDefault)
   })
 })
 

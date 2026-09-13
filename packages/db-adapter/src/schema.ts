@@ -469,8 +469,43 @@ CREATE TABLE IF NOT EXISTS exercise_entry_items (
 CREATE INDEX IF NOT EXISTS idx_exercise_entry_items_entry ON exercise_entry_items(exercise_entry_id);
 `
 
+/**
+ * Added in v6: scheduled meals. A `planned_meals` row earmarks a saved meal
+ * for a future day — either a specific `local_date` (one-off) or a `weekday`
+ * (0=Sunday..6=Saturday, recurring every week) — never both, per the CHECK
+ * below. There is no push-notification path in this app, so "auto-log" means
+ * the plan is realized into a real `meals` row the next time that date's data
+ * is read (see `materializePlannedMeals` in repo.ts): by the time the user
+ * opens that day, the meal is already sitting in the log, exactly as if it
+ * had been logged by hand that morning.
+ *
+ * `planned_meal_log` is the dedupe ledger — one row per (plan, date) that has
+ * already fired — so materializing is safe to call on every read without
+ * risking a duplicate log if a recurring Monday plan is viewed twice.
+ */
+export const SCHEDULED_MEALS_SCHEMA_V6 = `
+CREATE TABLE IF NOT EXISTS planned_meals (
+  id             INTEGER PRIMARY KEY,
+  saved_meal_id  INTEGER NOT NULL REFERENCES saved_meals(id) ON DELETE CASCADE,
+  meal_slot      TEXT,
+  local_date     TEXT,
+  weekday        INTEGER,
+  created_at     INTEGER NOT NULL,
+  CHECK ((local_date IS NOT NULL AND weekday IS NULL) OR (local_date IS NULL AND weekday IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_planned_meals_date ON planned_meals(local_date);
+CREATE INDEX IF NOT EXISTS idx_planned_meals_weekday ON planned_meals(weekday);
+
+CREATE TABLE IF NOT EXISTS planned_meal_log (
+  planned_meal_id INTEGER NOT NULL REFERENCES planned_meals(id) ON DELETE CASCADE,
+  local_date      TEXT NOT NULL,
+  meal_id         INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+  PRIMARY KEY (planned_meal_id, local_date)
+);
+`
+
 /** Current user-schema version. Bump with every migration added below. */
-export const USER_SCHEMA_VERSION = 5
+export const USER_SCHEMA_VERSION = 6
 
 export interface Migration {
   version: number
@@ -490,4 +525,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 3, sql: WORKOUT_SPLITS_SCHEMA_V3 },
   { version: 4, sql: FOOD_CLASSIFICATION_SCHEMA_V4 },
   { version: 5, sql: EXERCISE_ENTRY_ITEMS_SCHEMA_V5 },
+  { version: 6, sql: SCHEDULED_MEALS_SCHEMA_V6 },
 ]

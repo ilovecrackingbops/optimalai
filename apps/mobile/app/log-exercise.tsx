@@ -169,7 +169,12 @@ function IntensityScreen({ exercise, onBack }: { exercise: ExerciseKind; onBack:
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title={KIND_META[exercise].title} icon={KIND_META[exercise].icon} onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.sectionHead}>
           <Icon name="sun" size={20} color={theme.text} />
           <Text style={[type.title, { color: theme.text, fontSize: 26 }]}>Set intensity</Text>
@@ -308,7 +313,12 @@ function DescribeScreen({ onBack }: { onBack: () => void }) {
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title="Describe Exercise" onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <TextInput
           autoFocus
           placeholder="Describe workout time, intensity, etc."
@@ -377,7 +387,12 @@ function ManualScreen({ onBack }: { onBack: () => void }) {
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title="Manual" icon="flame" onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Text style={[type.label, { color: theme.textMuted }]}>Calories burned</Text>
         <TextInput
           autoFocus
@@ -499,6 +514,6 @@ const styles = StyleSheet.create({
     marginTop: space.lg,
   },
   example: { marginTop: space.lg, padding: space.lg, borderRadius: radius.lg },
-  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg },
+  dock: { padding: space.lg },
   cta: { height: 60, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
 })

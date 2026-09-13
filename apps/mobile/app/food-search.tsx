@@ -1,4 +1,4 @@
-import { router } from 'expo-router'
+import { router, useLocalSearchParams } from 'expo-router'
 import { useEffect, useMemo, useState } from 'react'
 import {
   ActivityIndicator,
@@ -14,9 +14,9 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { DbAdapter } from '@nutai/db-adapter'
-import { resolveByText, type ScoredCandidate } from '@nutai/resolver'
+import { ladderStepWords, rankForSearch, resolveByTextForSearch, type ScoredCandidate, type ScoringContext } from '@nutai/resolver'
 import { nutritionCorpusInfo, openNutritionDb } from '../src/db/expo-adapter'
-import { db as userDb } from '../src/data/repo'
+import { atDate, db as userDb } from '../src/data/repo'
 import { resolveSelection } from '../src/data/food-search-select'
 import { logManualFood } from '../src/data/manual-food'
 import type { ManualFoodSelection } from '../src/data/manual-food'
@@ -39,15 +39,37 @@ import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
  * every manually-added food landed at whatever the FNDDS default portion
  * happened to be, with no chance to say "actually I had 150 g, not 85."
  */
+
+/**
+ * "Beef tendon" isn't in this corpus at all (a real data gap, not a ranking
+ * bug) — `resolveByTextForSearch` drops "tendon" and searches "beef" alone
+ * instead. Without this note, that reads as the app ignoring half of what
+ * was typed and showing arbitrary beef cuts; with it, the honest thing that
+ * actually happened is visible instead of silently assumed.
+ */
+function broadenedNote(query: string, droppedWords: readonly string[]): string {
+  if (droppedWords.length === 0) return ''
+  const kept = ladderStepWords(query, 0).filter((w) => !droppedWords.includes(w))
+  if (kept.length === 0) {
+    return ' — no single food matched every word, showing partial matches'
+  }
+  return ` — no match for "${droppedWords.join(', ')}", showing "${kept.join(' ')}" instead`
+}
 export default function FoodSearch() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
 
   const [db, setDb] = useState<DbAdapter | null>(null)
   const [corpus, setCorpus] = useState<{ foods: number; portions: number; builtAt: string | null } | null>(null)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<ScoredCandidate[]>([])
   const [outcome, setOutcome] = useState<string>('')
+  // Set whenever the corpus didn't have an exact match for the full phrase —
+  // zero results, or a broadened search that had to drop some of what was
+  // typed. Drives the "Describe it instead" offer rather than leaving
+  // someone stuck scrolling results that aren't what they searched for.
+  const [imperfectMatch, setImperfectMatch] = useState(false)
   const [busy, setBusy] = useState(false)
   const [resolvingId, setResolvingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -69,32 +91,42 @@ export default function FoodSearch() {
   }, [])
 
   useEffect(() => {
-    if (!db || query.trim().length < 2) { setResults([]); setOutcome(''); return }
+    if (!db || query.trim().length < 2) { setResults([]); setOutcome(''); setImperfectMatch(false); return }
     let alive = true
     setBusy(true)
     const timer = setTimeout(async () => {
-      const r = await resolveByText(
+      const ctx: ScoringContext = {
+        canonicalFoodKey: query,
+        observedBrand: null,
+        prepFacet: null,
+        modelCategory: null,
+        estimatedGrams: 150,
+      }
+      const r = await resolveByTextForSearch(
         db,
-        {
-          canonicalFoodKey: query,
-          observedBrand: null,
-          prepFacet: null,
-          modelCategory: null,
-          estimatedGrams: 150,
-        },
-        // A search screen shows a ranked list, not a 5-item multiple-choice
-        // chip sheet — `candidates` is always the full ranked list regardless
-        // of outcome, so a confident top match still shows its runners-up.
-        30,
+        ctx,
+        // MUST match (or exceed) the corpus's own candidate fetch limit
+        // (2000) — asking for fewer here used to mean the ranking below only
+        // ever got to reorder whichever handful the fetch already preferred,
+        // and could never recover a plain, common row (a plain "Milk, whole"
+        // search) that had been pushed past the cutoff. Asking for the full
+        // pool and re-ranking it ourselves is what makes `rankForSearch`
+        // actually decide the order.
+        2000,
       )
       if (!alive) return
-      setResults(r.candidates)
-      if (r.outcome.kind === 'auto_accept') {
-        setOutcome(`Best match: ${r.outcome.match.name}`)
-      } else if (r.candidates.length > 0) {
-        setOutcome(`${r.candidates.length} result${r.candidates.length === 1 ? '' : 's'}`)
+      // Re-ranked for "surface the food I actually typed" — the AI-scan
+      // pipeline's composite score alone (tuned for auto-accept/disambiguate
+      // decisions) let bm25's length penalty bury a plain "Milk, ..." row
+      // under branded noise, and let "Sweet potato leaves" — a different
+      // food that merely shares the phrase — outrank "Sweet potato" itself.
+      const ranked = rankForSearch(r.candidates, ctx).slice(0, 40)
+      setResults(ranked)
+      setImperfectMatch(ranked.length === 0 || r.droppedWords.length > 0)
+      if (ranked.length > 0) {
+        setOutcome(`${ranked.length} result${ranked.length === 1 ? '' : 's'}${broadenedNote(query, r.droppedWords)}`)
       } else {
-        setOutcome('no match — this would log as an AI estimate')
+        setOutcome('no match in the database')
       }
       setBusy(false)
     }, 180)
@@ -123,7 +155,7 @@ export default function FoodSearch() {
     setSaving(true)
     try {
       const h = await userDb()
-      await logManualFood(h, { ...pending, grams }, Date.now())
+      await logManualFood(h, { ...pending, grams }, forDate ? atDate(forDate) : Date.now())
       Keyboard.dismiss()
       router.back()
     } catch {
@@ -153,6 +185,7 @@ export default function FoodSearch() {
       <ScrollView
         style={{ backgroundColor: theme.bg }}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         contentContainerStyle={{ padding: space.lg, paddingTop: insets.top + space.lg, paddingBottom: 160 }}
       >
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -181,6 +214,25 @@ export default function FoodSearch() {
         {outcome !== '' && (
           <Text style={[type.micro, { color: theme.textFaint, marginTop: space.md }]}>{outcome.toUpperCase()}</Text>
         )}
+
+        {imperfectMatch ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() =>
+              router.push({
+                pathname: '/log-food-text',
+                params: forDate ? { prefill: query, forDate } : { prefill: query },
+              } as never)
+            }
+            style={[styles.describeCta, { backgroundColor: theme.bgSunken, borderColor: theme.border }]}
+          >
+            <Icon name="pencil" size={16} color={theme.protein} />
+            <Text style={[type.label, { color: theme.protein, flex: 1 }]}>
+              Not in the database? Describe "{query}" instead
+            </Text>
+            <Icon name="chevron" size={14} color={theme.protein} />
+          </Pressable>
+        ) : null}
 
         {error != null && (
           <Text style={[type.caption, { color: theme.safety, marginTop: space.md }]}>{error}</Text>
@@ -240,6 +292,11 @@ export default function FoodSearch() {
               <Text style={[type.body, { color: theme.textMuted }]}>Cancel</Text>
             </Pressable>
           </View>
+          {forDate ? (
+            <Text style={[type.caption, { color: theme.protein, marginTop: space.xs }]}>
+              Logging for {new Date(atDate(forDate)).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}, not today
+            </Text>
+          ) : null}
 
           <Text style={[type.label, { color: theme.textMuted, marginTop: space.xl }]}>Amount (grams)</Text>
           <TextInput
@@ -289,6 +346,16 @@ function PreviewStat({ label, value }: { label: string; value: string }) {
 }
 
 const styles = StyleSheet.create({
+  describeCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    marginTop: space.md,
+    padding: space.md,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    minHeight: MIN_TAP_TARGET,
+  },
   input: {
     marginTop: space.lg,
     paddingHorizontal: space.lg,

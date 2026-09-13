@@ -1,6 +1,6 @@
 import { router } from 'expo-router'
 import type { ReactNode } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from '../Icon'
 import { useTheme } from '../../theme/ThemeProvider'
@@ -103,13 +103,19 @@ export function OnboardingScreen({
   )
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1, backgroundColor: theme.bg }}
+    >
       <OnboardingHeader step={step} total={total} />
 
       {scroll ? (
         <ScrollView
+          style={{ flex: 1 }}
           contentContainerStyle={{ paddingHorizontal: space.lg, paddingBottom: 180 }}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
         >
           {body}
         </ScrollView>
@@ -155,7 +161,7 @@ export function OnboardingScreen({
           </Pressable>
         ) : null}
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 

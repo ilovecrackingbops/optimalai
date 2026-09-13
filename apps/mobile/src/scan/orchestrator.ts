@@ -352,7 +352,7 @@ export async function startTextScan(description: string): Promise<void> {
   }
 
   const model = (await setting('provider_model')) || cheapestModel(provider).id
-  const outcome = await runTextFoodScan(provider, { model, description }, credential)
+  const outcome = await runTextFoodScan(provider, { model, description, jsonSchema: wireSchemaFor(provider) }, credential)
 
   if (!outcome.ok) {
     setPhase({

@@ -15,15 +15,28 @@ export interface VisionJsonInput {
 
 /**
  * Text-only sibling of buildVisionJsonRequest — same transport, no image.
- * Used by the exercise Describe path.
+ * Used by the exercise Describe path and text-only food logging.
+ *
+ * `jsonSchema` is optional and, when passed, turns on the same provider
+ * structured-output dialect the photo scan path uses (see providers.ts's
+ * buildAnthropicRequest/buildOpenAIRequest/buildGeminiRequest) instead of the
+ * bare `json_object` mode below. Plain `json_object` mode asks the model to
+ * produce SOME JSON but enforces nothing about its shape, leaning entirely on
+ * prompt-following — which is exactly where providers diverge most: the same
+ * "4 raw eggs and 10g of liver" description that Claude gets right every
+ * time can come back from GPT missing a required enum field or in a shape
+ * the client-side Zod validator rejects outright. Structured-output mode
+ * makes the PROVIDER responsible for conforming to the schema, closing that
+ * gap without changing the prompt at all.
  */
 export function buildTextJsonRequest(
   provider: ProviderId,
-  input: { model: string; instruction: string; maxTokens?: number },
+  input: { model: string; instruction: string; maxTokens?: number; jsonSchema?: unknown },
   credential: { kind: 'api_key' | 'oauth'; value: string },
   promptVersion: string,
 ): ProviderRequest {
   const maxTokens = input.maxTokens ?? 512
+  const jsonSchema = input.jsonSchema ?? null
 
   if (provider === 'anthropic') {
     const headers: Record<string, string> =
@@ -42,6 +55,7 @@ export function buildTextJsonRequest(
         model: input.model,
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: input.instruction }],
+        ...(jsonSchema == null ? {} : { output_config: { format: { type: 'json_schema', schema: jsonSchema } } }),
       },
       promptVersion,
     }
@@ -55,7 +69,10 @@ export function buildTextJsonRequest(
         model: input.model,
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: input.instruction }],
-        response_format: { type: 'json_object' },
+        response_format:
+          jsonSchema == null
+            ? { type: 'json_object' }
+            : { type: 'json_schema', json_schema: { name: 'TextFoodLog', strict: true, schema: jsonSchema } },
       },
       promptVersion,
     }
@@ -66,7 +83,11 @@ export function buildTextJsonRequest(
     headers: { 'x-goog-api-key': credential.value, 'content-type': 'application/json' },
     body: {
       contents: [{ role: 'user', parts: [{ text: input.instruction }] }],
-      generationConfig: { responseMimeType: 'application/json', maxOutputTokens: maxTokens },
+      generationConfig: {
+        responseMimeType: 'application/json',
+        ...(jsonSchema == null ? {} : { responseSchema: jsonSchema }),
+        maxOutputTokens: maxTokens,
+      },
     },
     promptVersion,
   }

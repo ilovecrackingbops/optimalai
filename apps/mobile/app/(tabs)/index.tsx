@@ -1,6 +1,6 @@
 import { Image } from 'expo-image'
 import { router, useFocusEffect } from 'expo-router'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Pressable,
   ScrollView,
@@ -20,6 +20,8 @@ import { formatWeightKg, getUnitPref, type UnitPref } from '../../src/data/units
 import { nutrientHighlights, type NutrientHighlight } from '../../src/data/micronutrients'
 import { openNutritionDb } from '../../src/db/expo-adapter'
 import {
+  copyMealsFromDate,
+  countStreak,
   currentGoal,
   dayTotals,
   db,
@@ -27,7 +29,10 @@ import {
   exerciseEntries,
   exerciseTotals,
   localDate,
+  loggedDates,
   logWater,
+  materializePlannedMeals,
+  mealCountForDate,
   mealsForDate,
   runAdaptive,
   setting,
@@ -56,6 +61,30 @@ const ML_PER_FL_OZ = 29.5735
 const WATER_QUICK_ADD_ML = 8 * ML_PER_FL_OZ
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/**
+ * The same four food-logging destinations as the tab bar's FAB sheet, minus
+ * "Log exercise" — this menu only exists to carry a `forDate` param onto a
+ * day other than today, and exercise entries aren't part of that ask.
+ */
+const LOG_ACTIONS: ReadonlyArray<{ label: string; icon: IconName; route: string }> = [
+  { label: 'Scan food', icon: 'scan', route: '/camera' },
+  { label: 'Describe a meal', icon: 'pencil', route: '/log-food-text' },
+  { label: 'Food Database', icon: 'search', route: '/food-search' },
+  { label: 'Saved foods', icon: 'bookmark', route: '/saved-foods' },
+]
+
+/** Header for the log list below the hero card — names the day once you're not looking at today. */
+function dayLogLabel(offset: number, d: Date): string {
+  if (offset === 0) return "Today's log"
+  const who =
+    offset === -1
+      ? 'yesterday'
+      : offset === 1
+        ? 'tomorrow'
+        : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  return `Log for ${who}`
+}
 
 /**
  * Home.
@@ -93,35 +122,59 @@ export default function Home() {
   const [unitPref, setUnitPref] = useState<UnitPref>('imperial')
   const [micros, setMicros] = useState<NutrientHighlight[]>([])
   const [stepGoal, setStepGoal] = useState(DEFAULT_STEPS_GOAL)
+  const [copyPickerOpen, setCopyPickerOpen] = useState(false)
+  const [copyCandidates, setCopyCandidates] = useState<{ date: string; label: string; count: number }[]>([])
+  const [copying, setCopying] = useState(false)
+  const [streak, setStreak] = useState(0)
+  const [logSheetOpen, setLogSheetOpen] = useState(false)
 
   const selected = useMemo(() => Date.now() + offset * 86_400_000, [offset])
+
+  // Both panels are relative to `selected` (copy candidates are computed from
+  // it; the log sheet's "for this day" only makes sense for the day you're
+  // looking at) — switching days while either is open would otherwise leave
+  // it showing stale options for the day you just left.
+  useEffect(() => {
+    setCopyPickerOpen(false)
+    setLogSheetOpen(false)
+  }, [offset])
 
   const reload = useCallback(() => {
     let alive = true
     void (async () => {
+      const date = localDate(selected)
+      // Any scheduled meal due on this date is realized into a real logged
+      // meal BEFORE totals are read, so it counts the first time this day is
+      // ever opened — no separate "apply my plan" step.
+      await materializePlannedMeals(date, Date.now())
       // The adaptive loop runs BEFORE reading the goal, so a target it just
       // changed is the one rendered. Its own gates decide whether it may act.
       const outcome = await runAdaptive(Date.now())
-      const date = localDate(selected)
-      const [g, t, ex, exList, ml, avail, hk, hkWorkouts, weights, water, units, stepGoalStr] = await Promise.all([
-        currentGoal(),
-        dayTotals(date),
-        exerciseTotals(date),
-        exerciseEntries(date),
-        mealsForDate(date),
-        availability(),
-        readToday(selected),
-        readTodayWorkouts(selected),
-        weightHistory(),
-        waterTotal(date),
-        getUnitPref(),
-        setting('stepGoal', String(DEFAULT_STEPS_GOAL)),
-      ])
+      const [g, t, ex, exList, ml, avail, hk, hkWorkouts, weights, water, units, stepGoalStr, dates] =
+        await Promise.all([
+          currentGoal(),
+          dayTotals(date),
+          exerciseTotals(date),
+          exerciseEntries(date),
+          mealsForDate(date),
+          availability(),
+          readToday(selected),
+          readTodayWorkouts(selected),
+          weightHistory(),
+          waterTotal(date),
+          getUnitPref(),
+          setting('stepGoal', String(DEFAULT_STEPS_GOAL)),
+          // The streak is always anchored to the REAL today, never to whatever
+          // day the strip happens to be browsing — flipping back to Tuesday
+          // must not make the header streak read as if Tuesday were current.
+          loggedDates(),
+        ])
       if (!alive) return
       setAdaptive(outcome)
       setGoal(g)
       setTotals(t)
       setStepGoal(Number(stepGoalStr) || DEFAULT_STEPS_GOAL)
+      setStreak(countStreak(dates))
       setExercise(ex)
       setExerciseList(exList)
       setHealthWorkouts(hkWorkouts)
@@ -155,6 +208,35 @@ export default function Home() {
     if (waterMl <= 0) return
     setWaterMl((v) => Math.max(0, v - WATER_QUICK_ADD_ML))
     void undoLastWater(date)
+  }
+
+  async function openCopyPicker() {
+    const days = await Promise.all(
+      Array.from({ length: 7 }, (_, i) => i + 1).map(async (back) => {
+        const ms = selected - back * 86_400_000
+        const d = localDate(ms)
+        const count = await mealCountForDate(d)
+        const label =
+          back === 1
+            ? 'Yesterday'
+            : new Date(ms).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+        return { date: d, label, count }
+      }),
+    )
+    setCopyCandidates(days.filter((d) => d.count > 0))
+    setCopyPickerOpen(true)
+  }
+
+  async function copyFrom(fromDate: string) {
+    if (copying) return
+    setCopying(true)
+    try {
+      await copyMealsFromDate(fromDate, date, Date.now())
+      setCopyPickerOpen(false)
+      reload()
+    } finally {
+      setCopying(false)
+    }
   }
 
   if (!goal || !totals) {
@@ -197,7 +279,7 @@ export default function Home() {
         <Text style={[styles.wordmark, { color: theme.text }]}>Optimal AI</Text>
         <View style={[styles.streakPill, { backgroundColor: theme.bgSunken }]}>
           <Icon name="flame" size={16} color={theme.text} />
-          <Text style={[type.bodyStrong, { color: theme.text }]}>0</Text>
+          <Text style={[type.bodyStrong, { color: theme.text }]}>{streak}</Text>
         </View>
       </View>
 
@@ -222,17 +304,32 @@ export default function Home() {
         {/* Page 1 — calories and the three macros */}
         <View style={{ width, paddingHorizontal: space.lg }}>
           <View style={[styles.heroCard, { backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.hero, { color: theme.text }]}>
-                {Math.abs(Math.round(remaining))}
-              </Text>
-              <Text style={[type.body, { color: theme.textMuted }]}>
-                {over ? 'Calories over' : 'Calories left'}
-              </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.hero, { color: theme.text }]}>
+                  {Math.abs(Math.round(remaining))}
+                </Text>
+                <Text style={[type.body, { color: theme.textMuted }]}>
+                  {over ? 'Calories over' : 'Calories left'}
+                </Text>
+              </View>
+              <Ring pct={pct} over={over} size={128} stroke={12}>
+                <Icon name="flame" size={26} color={theme.text} />
+              </Ring>
             </View>
-            <Ring pct={pct} over={over} size={128} stroke={12}>
-              <Icon name="flame" size={26} color={theme.text} />
-            </Ring>
+
+            {/* "Calories left" alone can't be read backwards into "how much did I
+                eat" once exercise is in the mix — burning 400 kcal pushes this
+                number UP without a bite being eaten. Food is the number the app
+                never showed on its own; it's now always visible here regardless
+                of how the remaining/over math nets out. */}
+            <View style={[styles.heroBreakdown, { borderTopColor: theme.border }]}>
+              <BreakdownStat label="Goal" value={goal.targetKcal} />
+              <Text style={[type.body, { color: theme.textFaint }]}>−</Text>
+              <BreakdownStat label="Food" value={totals.kcal} emphasize />
+              <Text style={[type.body, { color: theme.textFaint }]}>+</Text>
+              <BreakdownStat label="Exercise" value={burnedKcal} />
+            </View>
           </View>
 
           <View style={styles.macroRow}>
@@ -515,7 +612,93 @@ export default function Home() {
 
       {/* Today's log — tappable, so a logged meal is editable, not a dead end */}
       <View style={{ paddingHorizontal: space.lg, marginTop: space.xl }}>
-        <Text style={[type.title, { color: theme.text, fontSize: 24 }]}>Today's log</Text>
+        <View style={styles.spread}>
+          <Text style={[type.title, { color: theme.text, fontSize: 24 }]}>{dayLogLabel(offset, new Date(selected))}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
+            {offset !== 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Log a meal for this day"
+                onPress={() => {
+                  setCopyPickerOpen(false)
+                  setLogSheetOpen((o) => !o)
+                }}
+                hitSlop={space.sm}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+              >
+                <Icon name="plus" size={16} color={theme.protein} />
+                <Text style={[type.label, { color: theme.protein }]}>Log meal</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Copy meals from a previous day"
+              onPress={() => {
+                setLogSheetOpen(false)
+                copyPickerOpen ? setCopyPickerOpen(false) : void openCopyPicker()
+              }}
+              hitSlop={space.sm}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+            >
+              <Icon name="calendar" size={16} color={theme.protein} />
+              <Text style={[type.label, { color: theme.protein }]}>Copy day</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {logSheetOpen ? (
+          <View style={[styles.copyPanel, { backgroundColor: theme.bgSunken }]}>
+            <Text style={[type.caption, { color: theme.textMuted, marginBottom: space.sm }]}>
+              Opens as usual — whatever you log lands on {dayLogLabel(offset, new Date(selected)).replace('Log for ', '')}, not today.
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+              {LOG_ACTIONS.map((a) => (
+                <Pressable
+                  key={a.route}
+                  onPress={() => {
+                    setLogSheetOpen(false)
+                    router.push({ pathname: a.route, params: { forDate: date } } as never)
+                  }}
+                  style={[styles.copyChip, { borderColor: theme.border, backgroundColor: theme.bgElevated, flexDirection: 'row', gap: space.xs }]}
+                >
+                  <Icon name={a.icon} size={16} color={theme.text} />
+                  <Text style={[type.label, { color: theme.text }]}>{a.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {copyPickerOpen ? (
+          <View style={[styles.copyPanel, { backgroundColor: theme.bgSunken }]}>
+            {copyCandidates.length === 0 ? (
+              <Text style={[type.caption, { color: theme.textMuted }]}>
+                No meals logged in the last 7 days to copy from.
+              </Text>
+            ) : (
+              <>
+                <Text style={[type.caption, { color: theme.textMuted, marginBottom: space.sm }]}>
+                  Copy every meal from that day onto {date === localDate(Date.now()) ? 'today' : 'this day'}.
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+                  {copyCandidates.map((c) => (
+                    <Pressable
+                      key={c.date}
+                      disabled={copying}
+                      onPress={() => void copyFrom(c.date)}
+                      style={[styles.copyChip, { borderColor: theme.border, backgroundColor: theme.bgElevated }]}
+                    >
+                      <Text style={[type.label, { color: theme.text }]}>{c.label}</Text>
+                      <Text style={[type.micro, { color: theme.textFaint }]}>
+                        {c.count} meal{c.count === 1 ? '' : 's'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            )}
+          </View>
+        ) : null}
 
         {empty ? (
           <View style={[styles.emptyCard, { backgroundColor: theme.bgSunken }]}>
@@ -527,7 +710,7 @@ export default function Home() {
               </View>
             </View>
             <Text style={[type.body, { color: theme.textMuted, textAlign: 'center', marginTop: space.lg }]}>
-              Tap + to add your first meal of the day
+              {offset === 0 ? 'Tap + to add your first meal of the day' : 'Tap "Log meal" above to log ahead for this day'}
             </Text>
           </View>
         ) : (
@@ -582,32 +765,28 @@ function DayStrip({ selected, onSelect }: { selected: number; onSelect: (o: numb
       {days.map((off) => {
         const d = new Date(Date.now() + off * 86_400_000)
         const isSel = off === selected
+        // Future days are selectable — you can log ahead of time — but stay
+        // visually distinct from past (dashed, already happened) and today.
         const future = off > 0
         return (
           <Pressable
             key={off}
-            disabled={future}
             onPress={() => onSelect(off)}
             accessibilityRole="button"
-            accessibilityState={{ selected: isSel, disabled: future }}
+            accessibilityState={{ selected: isSel }}
             style={[styles.dayCol, isSel && { backgroundColor: theme.bgElevated }]}
           >
-            <Text style={[type.caption, { color: future ? theme.textFaint : theme.textMuted }]}>
-              {DAY_LABELS[d.getDay()]}
-            </Text>
+            <Text style={[type.caption, { color: theme.textMuted }]}>{DAY_LABELS[d.getDay()]}</Text>
             <View
               style={[
                 styles.dayCircle,
                 {
-                  borderColor: isSel ? theme.text : theme.border,
-                  borderStyle: off < 0 ? 'dashed' : 'solid',
-                  opacity: future ? 0.4 : 1,
+                  borderColor: isSel ? theme.text : future ? theme.protein : theme.border,
+                  borderStyle: off < 0 ? 'dashed' : future ? 'dotted' : 'solid',
                 },
               ]}
             >
-              <Text style={[type.bodyStrong, { color: future ? theme.textFaint : theme.text }]}>
-                {d.getDate()}
-              </Text>
+              <Text style={[type.bodyStrong, { color: theme.text }]}>{d.getDate()}</Text>
             </View>
           </Pressable>
         )
@@ -659,6 +838,18 @@ function Ring({
   )
 }
 
+function BreakdownStat({ label, value, emphasize }: { label: string; value: number; emphasize?: boolean }) {
+  const theme = useTheme()
+  return (
+    <View style={{ alignItems: 'center' }}>
+      <Text style={[type.bodyStrong, { color: emphasize ? theme.text : theme.textMuted }]}>
+        {Math.round(value)}
+      </Text>
+      <Text style={[type.micro, { color: theme.textFaint, marginTop: 2 }]}>{label}</Text>
+    </View>
+  )
+}
+
 function MacroCard({
   label, icon, eaten, target, color, unit = 'g',
 }: {
@@ -670,7 +861,6 @@ function MacroCard({
   unit?: string
 }) {
   const theme = useTheme()
-  const left = Math.max(0, target - eaten)
   const pct = target > 0 ? Math.min(1, eaten / target) : 0
   const size = 74
   const r = size / 2 - 5
@@ -678,12 +868,17 @@ function MacroCard({
 
   return (
     <View style={[styles.macroCard, { backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
-      {/* "2300mg" must shrink, never wrap — a two-line number reads broken. */}
+      {/* Eaten leads — "X left" alone never says how much you're actually at,
+          which is exactly the number a target-vs-actual comparison needs.
+          "2300mg" must shrink, never wrap — a two-line number reads broken. */}
       <Text style={[styles.macroNum, { color: theme.text }]} numberOfLines={1} adjustsFontSizeToFit>
-        {Math.round(left)}
+        {Math.round(eaten)}
         {unit}
       </Text>
-      <Text style={[type.caption, { color: theme.textMuted }]}>{label} left</Text>
+      <Text style={[type.caption, { color: theme.textMuted }]} numberOfLines={1} adjustsFontSizeToFit>
+        {label} · {Math.round(target)}
+        {unit} goal
+      </Text>
 
       <View style={{ alignItems: 'center', marginTop: space.md }}>
         <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
@@ -728,11 +923,17 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   heroCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
     padding: space.xl,
     borderRadius: radius.xl,
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  heroBreakdown: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: space.lg,
+    paddingTop: space.lg,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
   hero: { fontSize: 46, fontWeight: '800', letterSpacing: -1.8 },
   mid: { fontSize: 26, fontWeight: '800', letterSpacing: -0.8 },
@@ -767,6 +968,16 @@ const styles = StyleSheet.create({
   },
   dots: { flexDirection: 'row', justifyContent: 'center', gap: space.sm, marginTop: space.lg },
   dot: { width: 7, height: 7, borderRadius: 4 },
+  copyPanel: { marginTop: space.sm, padding: space.lg, borderRadius: radius.xl },
+  copyChip: {
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    minHeight: MIN_TAP_TARGET,
+    justifyContent: 'center',
+  },
   emptyCard: { marginTop: space.md, padding: space.lg, borderRadius: radius.xl },
   ghostRow: {
     flexDirection: 'row', alignItems: 'center', gap: space.md,

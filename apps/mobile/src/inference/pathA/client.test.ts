@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { runLabelScan, runScan, runScanWithFallback, runWebLookup } from './client'
+import { runLabelScan, runScan, runScanWithFallback, runTextFoodScan, runWebLookup } from './client'
 
 /**
  * The cloud client against scripted responses: envelope extraction for every
@@ -178,6 +178,63 @@ describe('runWebLookup JSON fishing', () => {
     expect(r.error?.kind).toBe('schema-violation')
   })
 })
+
+describe('runTextFoodScan structured-output mode', () => {
+  // Regression: "4 raw eggs and 10g of liver" via OpenAI came back in a shape
+  // the client-side Zod validator rejected outright, while Anthropic handled
+  // the identical description fine — plain `json_object` mode enforces
+  // nothing about the response shape, leaning entirely on prompt-following,
+  // which is exactly where providers diverge. Passing a jsonSchema turns on
+  // each provider's real structured-output dialect instead.
+  it('attaches the schema per provider when one is passed', async () => {
+    for (const [provider, marker] of [
+      ['anthropic', 'output_config'],
+      ['openai', 'json_schema'],
+      ['google', 'responseSchema'],
+    ] as const) {
+      const { calls, impl } = scripted([
+        { status: 200, body: providerEnvelope(provider, '{"is_food":true}') },
+      ])
+      await runTextFoodScan(
+        provider,
+        { model: 'm', description: '4 raw eggs and 10g of liver', jsonSchema: { type: 'object' } },
+        { kind: 'api_key', value: 'k' },
+        impl,
+      )
+      expect(JSON.stringify(calls[0]!.body)).toContain(marker)
+    }
+  })
+
+  it('omits structured-output entirely when no schema is passed', async () => {
+    const { calls, impl } = scripted([{ status: 200, body: providerEnvelope('openai', '{"is_food":true}') }])
+    await runTextFoodScan('openai', { model: 'm', description: 'a banana' }, { kind: 'api_key', value: 'k' }, impl)
+    expect(calls[0]!.body.response_format).toEqual({ type: 'json_object' })
+  })
+
+  it('retries once with no schema on a structural 400, same safety net as photo scans', async () => {
+    const { calls, impl } = scripted([
+      { status: 400, body: '{"error":"schema not supported"}' },
+      { status: 200, body: providerEnvelope('openai', '{"is_food":true}') },
+    ])
+    const r = await runTextFoodScan(
+      'openai',
+      { model: 'm', description: '4 raw eggs and 10g of liver', jsonSchema: { type: 'object' } },
+      { kind: 'api_key', value: 'k' },
+      impl,
+    )
+    expect(r.ok).toBe(true)
+    expect(r.usedSchemaFallback).toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(JSON.stringify(calls[0]!.body)).toContain('json_schema')
+    expect(calls[1]!.body.response_format).toEqual({ type: 'json_object' })
+  })
+})
+
+function providerEnvelope(provider: 'anthropic' | 'openai' | 'google', jsonText: string): string {
+  if (provider === 'anthropic') return JSON.stringify({ content: [{ type: 'text', text: jsonText }] })
+  if (provider === 'openai') return JSON.stringify({ choices: [{ message: { content: jsonText } }] })
+  return JSON.stringify({ candidates: [{ content: { parts: [{ text: jsonText }] } }] })
+}
 
 describe('runLabelScan', () => {
   it('openai label scans use chat completions, not the Responses API', async () => {
