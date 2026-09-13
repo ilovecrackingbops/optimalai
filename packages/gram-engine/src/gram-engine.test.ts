@@ -92,6 +92,43 @@ describe('the ladder is ordered by trust, not convenience', () => {
     expect(r.grams).toBe(170)
   })
 
+  it('a stated quantity ("300g of ground beef") outranks a generic FNDDS default, not the other way around', () => {
+    // Regression for a real bug: text-food-log.ts tells the model to set
+    // portion_confidence HIGH when the user typed an explicit weight, but
+    // nothing in gram estimation read that field — the model_guess tier's
+    // weight was fixed at 0.25 regardless, always losing to Tier 4's generic
+    // small/medium/large lookup (0.55). "300g of ground beef" resolved
+    // against fndds_standard_portion's ~90g "medium serving" instead of the
+    // 300 the user actually typed.
+    const stated = estimateGrams({
+      item: item({
+        canonical_food_key: 'ground beef',
+        qualitative_size: 'medium',
+        model_gram_estimate: 300,
+        portion_confidence: 0.95, // set high by text-food-log.ts for an explicit "300g"
+      }),
+      priors: emptyPriors,
+      db: db({ medium: 90 }), // a generic FNDDS "medium serving" the user never asked for
+      resolved: { foodId: 'beef', description: 'Ground beef' },
+    })
+    expect(stated.grams).toBe(300)
+
+    // A genuinely low-confidence guess (a rough photo estimate) still loses
+    // to the FNDDS default, unchanged from before this fix.
+    const guessed = estimateGrams({
+      item: item({
+        canonical_food_key: 'ground beef',
+        qualitative_size: 'medium',
+        model_gram_estimate: 300,
+        portion_confidence: 0.5,
+      }),
+      priors: emptyPriors,
+      db: db({ medium: 90 }),
+      resolved: { foodId: 'beef', description: 'Ground beef' },
+    })
+    expect(guessed.grams).toBe(90)
+  })
+
   it('a trusted personal prior outranks the model guess', () => {
     const prior: PersonalPrior = {
       foodConceptKey: 'chicken breast',

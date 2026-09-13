@@ -70,14 +70,23 @@ export function harrisBenedict(b: BodyInputs): number {
 
 export type BmrEquation = 'mifflin' | 'katch' | 'harris'
 
-export function computeBmr(b: BodyInputs, equation: BmrEquation = 'mifflin'): number {
-  if (equation === 'katch') {
+/**
+ * `equation` left unspecified means "pick the best one FOR THIS PERSON," not
+ * "always Mifflin": Katch-McArdle is more accurate whenever a real body-fat %
+ * exists, so it is the default the moment one has been hand-entered — no
+ * separate toggle to find and flip. A body fat value must still arrive from
+ * `b.bodyFatFraction`, which is only ever hand-typed, never inferred; asking
+ * for 'katch' explicitly without one is still a hard error, not a fallback.
+ */
+export function computeBmr(b: BodyInputs, equation?: BmrEquation): number {
+  const eq = equation ?? (b.bodyFatFraction != null ? 'katch' : 'mifflin')
+  if (eq === 'katch') {
     if (b.bodyFatFraction == null) {
       throw new Error('Katch-McArdle requires a body-fat fraction; it is never inferred.')
     }
     return katchMcArdle(b.weightKg, b.bodyFatFraction)
   }
-  if (equation === 'harris') return harrisBenedict(b)
+  if (eq === 'harris') return harrisBenedict(b)
   return mifflinStJeor(b)
 }
 
@@ -139,7 +148,7 @@ export interface CalorieTarget {
 
 /** Steps 2-5. */
 export function computeCalorieTarget(input: TargetInputs): CalorieTarget {
-  const bmr = computeBmr(input, input.equation ?? 'mifflin')
+  const bmr = computeBmr(input, input.equation)
   const tdee = computeTdee(bmr, input.activity)
 
   const dailyDelta = (input.rateLbPerWeek * KCAL_PER_LB) / 7
@@ -186,6 +195,29 @@ export function bmi(weightKg: number, heightCm: number): number {
 
 export const UNDERWEIGHT_BMI = 18.5
 
+export interface Ffmi {
+  /** Fat-free mass index — lean mass over height squared, same units as BMI. */
+  raw: number
+  /**
+   * Height-normalized to 1.8 m (the standard adjustment from Kouri et al. 1995),
+   * so a 5'6" and a 6'2" lifter with the same build read the same number. This
+   * is the figure usually meant by "your FFMI."
+   */
+  normalized: number
+}
+
+/**
+ * FFMI needs a body-fat percentage BMI never asks for, and it is never
+ * inferred — same rule as `katchMcArdle`'s bodyFatFraction: hand-entered only,
+ * or not computed at all.
+ */
+export function ffmi(weightKg: number, heightCm: number, bodyFatPct: number): Ffmi {
+  const heightM = heightCm / 100
+  const fatFreeMassKg = weightKg * (1 - bodyFatPct / 100)
+  const raw = fatFreeMassKg / (heightM * heightM)
+  return { raw, normalized: raw + 6.1 * (1.8 - heightM) }
+}
+
 /**
  * Step 6 — macro split, in grams per kg rather than percent of calories.
  *
@@ -211,15 +243,37 @@ export interface MacroTargets {
   carbsFloored: boolean
 }
 
-export function computeMacros(targetKcal: number, weightKg: number, goal: Goal): MacroTargets {
+/**
+ * An explicit, user-set percentage split — protein and fat as % of calories,
+ * carbs implied as the remainder. This is the opt-in EXCEPTION to the
+ * grams-per-kg default above, not a replacement for it: the reasoning against
+ * percent-of-calories (it scales protein with the budget instead of the
+ * body) still holds, but a user who deliberately asks for "30% protein, 30%
+ * fat" gets exactly that rather than the app quietly overriding a number they
+ * typed on purpose.
+ */
+export interface MacroSplitPct {
+  proteinPct: number
+  fatPct: number
+}
+
+export function computeMacros(
+  targetKcal: number,
+  weightKg: number,
+  goal: Goal,
+  customSplit?: MacroSplitPct,
+): MacroTargets {
   const rule = MACRO_RULES[goal]
-  const protein_g = rule.proteinPerKg * weightKg
-  const fat_g = Math.max((rule.fatPctOfCalories * targetKcal) / 9, rule.fatFloorPerKg * weightKg)
+  const protein_g = customSplit ? (customSplit.proteinPct / 100) * targetKcal / 4 : rule.proteinPerKg * weightKg
+  const fat_g = customSplit
+    ? (customSplit.fatPct / 100) * targetKcal / 9
+    : Math.max((rule.fatPctOfCalories * targetKcal) / 9, rule.fatFloorPerKg * weightKg)
   const rawCarbs = (targetKcal - 4 * protein_g - 9 * fat_g) / 4
 
   // At a very low target with a heavy user, protein plus fat can exceed the whole
   // budget. Floor carbs at zero rather than rendering a negative gram value, and
-  // signal it so the UI explains instead of showing nonsense.
+  // signal it so the UI explains instead of showing nonsense. Same rule applies
+  // whether the split came from the default weight-based rule or a custom one.
   return {
     protein_g,
     fat_g,

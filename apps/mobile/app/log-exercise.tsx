@@ -2,6 +2,8 @@ import { router } from 'expo-router'
 import { useState } from 'react'
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -44,11 +46,16 @@ type Step =
   | { kind: 'describe' }
   | { kind: 'manual' }
 
-const MENU: Array<{ step: Step; icon: IconName; title: string; sub: string }> = [
-  { step: { kind: 'intensity', exercise: 'run' }, icon: 'run', title: 'Run', sub: 'Running, jogging, sprinting, etc.' },
-  { step: { kind: 'intensity', exercise: 'weights' }, icon: 'dumbbell', title: 'Weight lifting', sub: 'Machines, free weights, etc.' },
-  { step: { kind: 'describe' }, icon: 'pencil', title: 'Describe', sub: 'Write your workout in text' },
-  { step: { kind: 'manual' }, icon: 'flame', title: 'Manual', sub: 'Enter exactly how many calories you burned' },
+type MenuItem =
+  | { kind: 'step'; step: Step; icon: IconName; title: string; sub: string }
+  | { kind: 'link'; icon: IconName; title: string; sub: string }
+
+const MENU: MenuItem[] = [
+  { kind: 'step', step: { kind: 'intensity', exercise: 'run' }, icon: 'run', title: 'Run', sub: 'Running, jogging, sprinting, etc.' },
+  { kind: 'step', step: { kind: 'intensity', exercise: 'weights' }, icon: 'dumbbell', title: 'Weight lifting', sub: 'Machines, free weights, etc.' },
+  { kind: 'link', icon: 'bars', title: 'My splits', sub: 'A repeatable training day — name it, list the exercises' },
+  { kind: 'step', step: { kind: 'describe' }, icon: 'pencil', title: 'Describe', sub: 'Write your workout in text' },
+  { kind: 'step', step: { kind: 'manual' }, icon: 'flame', title: 'Manual', sub: 'Enter exactly how many calories you burned' },
 ]
 
 const KIND_META: Record<ExerciseKind, { icon: IconName; title: string }> = {
@@ -121,7 +128,7 @@ function MenuScreen({ onPick }: { onPick: (s: Step) => void }) {
             <Pressable
               key={m.title}
               accessibilityRole="button"
-              onPress={() => onPick(m.step)}
+              onPress={() => (m.kind === 'step' ? onPick(m.step) : router.push('/splits' as never))}
               style={[styles.optionCard, { backgroundColor: theme.bgSunken }]}
             >
               <Icon name={m.icon} size={26} color={theme.text} />
@@ -160,9 +167,14 @@ function IntensityScreen({ exercise, onBack }: { exercise: ExerciseKind; onBack:
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title={KIND_META[exercise].title} icon={KIND_META[exercise].icon} onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 140 }}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.sectionHead}>
           <Icon name="sun" size={20} color={theme.text} />
           <Text style={[type.title, { color: theme.text, fontSize: 26 }]}>Set intensity</Text>
@@ -257,7 +269,7 @@ function IntensityScreen({ exercise, onBack }: { exercise: ExerciseKind; onBack:
           </Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
@@ -299,9 +311,14 @@ function DescribeScreen({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title="Describe Exercise" onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <TextInput
           autoFocus
           placeholder="Describe workout time, intensity, etc."
@@ -346,7 +363,7 @@ function DescribeScreen({ onBack }: { onBack: () => void }) {
           </Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
@@ -368,9 +385,14 @@ function ManualScreen({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: theme.bg }}>
       <Header title="Manual" icon="flame" onBack={onBack} />
-      <ScrollView contentContainerStyle={{ padding: space.lg }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: space.lg }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <Text style={[type.label, { color: theme.textMuted }]}>Calories burned</Text>
         <TextInput
           autoFocus
@@ -407,7 +429,7 @@ function ManualScreen({ onBack }: { onBack: () => void }) {
           <Text style={[type.bodyStrong, { color: theme.bg, fontSize: 18 }]}>Add Exercise</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
@@ -492,6 +514,6 @@ const styles = StyleSheet.create({
     marginTop: space.lg,
   },
   example: { marginTop: space.lg, padding: space.lg, borderRadius: radius.lg },
-  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg },
+  dock: { padding: space.lg },
   cta: { height: 60, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
 })

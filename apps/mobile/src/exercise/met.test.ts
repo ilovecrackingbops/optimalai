@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { exerciseKcal, INTENSITY_ANCHORS } from './met'
+import { exerciseKcal, INTENSITY_ANCHORS, stepsFallbackKcal } from './met'
 
 describe('exercise MET arithmetic', () => {
   it('matches the ACSM formula exactly', () => {
@@ -35,5 +35,19 @@ describe('exercise MET arithmetic', () => {
         expect(a.desc.length).toBeGreaterThan(5)
       }
     }
+  })
+})
+
+describe('steps fallback calorie estimate', () => {
+  it('scales with steps and body weight', () => {
+    expect(stepsFallbackKcal(10_000, 80)).toBe(400)
+    expect(stepsFallbackKcal(5_000, 80)).toBe(200)
+  })
+
+  it('refuses nonsense inputs with zero, never NaN', () => {
+    expect(stepsFallbackKcal(0, 80)).toBe(0)
+    expect(stepsFallbackKcal(10_000, 0)).toBe(0)
+    expect(stepsFallbackKcal(-1, 80)).toBe(0)
+    expect(stepsFallbackKcal(10_000, Number.NaN)).toBe(0)
   })
 })

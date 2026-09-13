@@ -70,11 +70,17 @@ describe('the asymmetry that keeps this from becoming a chore', () => {
     expect(qs.some((q) => q.question.id === 'cooking_oil')).toBe(false)
   })
 
-  it('does ask about oil on a stir-fry', () => {
+  it('flags oil as ambiguous on a stir-fry but never interrupts for it — the default is applied and disclosed instead', () => {
+    // Oil/milk-type/fat-%/diet-or-regular are all perceptual ambiguity about the
+    // food itself, not about how much was eaten — product decision is to never
+    // interrupt for these (see the doc comment on the interruption rule), so
+    // even a clearly-applicable, high-expected-value question like this one
+    // stays pre-answered rather than highlighted.
     const qs = selectQuestions({ item: stirFry })
     const oil = qs.find((q) => q.question.id === 'cooking_oil')
     expect(oil).toBeDefined()
-    expect(oil?.state).toBe('highlighted')
+    expect(oil?.state).toBe('pre_answered')
+    expect(oil?.appliedDefault).toBe(oil?.question.silentDefault)
   })
 })
 
@@ -99,6 +105,19 @@ describe('the two-question cap', () => {
       { item: { ...stirFry, name: 'Curry', canonical_food_key: 'chicken curry' } },
     ])
     expect(qs.filter((q) => q.state === 'highlighted').length).toBeLessThanOrEqual(MAX_QUESTIONS)
+  })
+
+  it('asks "did you eat all of it" ONCE for a meal, not once per ingredient', () => {
+    // A three-ingredient plate — chicken, rice, broccoli — each independently
+    // qualifies for portion_eaten (none carry legible_label_text). Without
+    // dedup this fired three identical copies of the same meal-wide question.
+    const qs = selectMealQuestions([
+      { item: item({ name: 'Chicken', canonical_food_key: 'chicken breast, grilled' }) },
+      { item: item({ name: 'Rice', canonical_food_key: 'rice, white, cooked' }) },
+      { item: item({ name: 'Broccoli', canonical_food_key: 'broccoli, raw' }) },
+    ])
+    const portionEaten = qs.filter((q) => q.question.id === 'portion_eaten')
+    expect(portionEaten.length).toBe(1)
   })
 
   it('demotes rather than drops, so every default stays disclosed', () => {
@@ -137,6 +156,31 @@ describe('every silent default is disclosed, never hidden', () => {
     // Silently assuming zero-calorie undercounts, and undercounting is the failure
     // a user cannot detect for themselves.
     expect(q.silentDefault).toBe('regular')
+  })
+
+  it('never asks "Regular or diet?" about a non-beverage, even when the model reports identity_ambiguous', () => {
+    // Regression: identity_ambiguous is a generic "not sure what food this is"
+    // reason set for all kinds of foods, not just soda — a text-logged "4 raw
+    // eggs" hit this because the model was unsure of something else entirely
+    // (egg size, count), and the bank blindly mapped that reason to a
+    // nonsensical "Regular or diet?" chip on plain eggs.
+    const qs = selectQuestions({
+      item: item({
+        name: 'Eggs', canonical_food_key: 'egg, raw', food_form: 'discrete', qualitative_size: 'count:4',
+        uncertainty_reason: 'identity_ambiguous', is_beverage: false, beverage_category: null,
+      }),
+    })
+    expect(qs.some((q) => q.question.id === 'regular_or_diet')).toBe(false)
+  })
+
+  it('still asks "Regular or diet?" for an actual soda the model could not identify', () => {
+    const qs = selectQuestions({
+      item: item({
+        name: 'Cola', canonical_food_key: 'cola', food_form: 'liquid', qualitative_size: 'medium',
+        uncertainty_reason: 'identity_ambiguous', is_beverage: true, beverage_category: 'soda_juice_other',
+      }),
+    })
+    expect(qs.some((q) => q.question.id === 'regular_or_diet')).toBe(true)
   })
 
   it('assumes the LOWER estimate for a shake, because the builder is one tap away', () => {

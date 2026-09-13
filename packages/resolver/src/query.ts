@@ -43,6 +43,25 @@ export function toMatchExpression(text: string): string | null {
 }
 
 /**
+ * Bare binary-state words dropped from the MANDATORY match tokens before the
+ * ladder is built — NOT specific cooking methods (grilled, roasted, ... stay,
+ * see toMatchExpression's test coverage). Requiring the literal word "raw" is
+ * worse than requiring nothing: USDA overwhelmingly says "dry" for an uncooked
+ * grain, never "raw" ("Cereals, oats, regular and quick, not fortified, dry"),
+ * so AND-ing "raw" into the query doesn't broaden matching, it NARROWS to
+ * whatever coincidentally happens to contain that literal word — for "oats,
+ * raw" that is exactly one row, "Oat bran, raw", a different food entirely.
+ * Because that rung returns a non-empty (if wrong) result, the ladder's
+ * broaden-on-zero-hit rule never gets a chance to reach the correct "oats"
+ * rung at all. Dropping these words from the QUERY doesn't lose the
+ * raw-vs-cooked signal — `ctx.canonicalFoodKey` still carries it straight
+ * through to `rawPreference`/`prepMatch`, which is where this distinction
+ * belongs: a scored preference among the candidates FTS finds, not a
+ * precondition for finding them.
+ */
+const STATE_WORDS = new Set(['raw', 'cooked', 'uncooked', 'unprepared', 'fresh'])
+
+/**
  * A progressively broader ladder of MATCH expressions.
  *
  * The full AND query is precise but brittle: one token absent from the corpus
@@ -57,7 +76,7 @@ export function matchLadder(canonicalFoodKey: string): string[] {
     .toLowerCase()
     .replace(FTS_SPECIAL, ' ')
     .split(/[\s,]+/)
-    .filter(Boolean)
+    .filter((t) => t.length > 0 && !STATE_WORDS.has(t))
 
   if (tokens.length === 0) return []
 
@@ -79,6 +98,29 @@ export function matchLadder(canonicalFoodKey: string): string[] {
   }
 
   return ladder
+}
+
+/**
+ * The plain, un-quoted words a given `matchLadder` step actually searched
+ * for — so a caller can tell the user "no match for X, showing Y instead"
+ * rather than silently returning results for a narrower query than the one
+ * typed. A search for "beef tendon" that finds nothing containing "tendon"
+ * broadens to "beef" alone at step 1 (`matchLadder`'s trailing-modifier
+ * drop); without disclosing that, a wall of unrelated beef cuts reads as the
+ * app ignoring what was typed rather than honestly saying it couldn't find
+ * "tendon" at all.
+ */
+export function ladderStepWords(canonicalFoodKey: string, step: number): string[] {
+  const tokens = canonicalFoodKey
+    .toLowerCase()
+    .replace(FTS_SPECIAL, ' ')
+    .split(/[\s,]+/)
+    .filter((t) => t.length > 0 && !STATE_WORDS.has(t))
+  if (tokens.length === 0) return []
+  // The final OR-fallback step (only reachable when there's more than one
+  // token) doesn't drop anything — it loosens AND to OR over every token.
+  if (step >= tokens.length) return tokens
+  return tokens.slice(0, tokens.length - step)
 }
 
 /** Trigram query for the typo-tolerant shadow index. Needs >= 3 characters. */

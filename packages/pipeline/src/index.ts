@@ -313,6 +313,7 @@ export async function runPipeline(
   const questions = selectMealQuestions(
     payload.items.map((item, i) => ({
       item,
+      rowId: items[i]?.row.id,
       ...(items[i]?.gramDisagreement ? { gramDisagreement: items[i]!.gramDisagreement } : {}),
       ...(deps.severityWeight != null ? { severityWeight: deps.severityWeight } : {}),
     })),

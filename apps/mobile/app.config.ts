@@ -5,9 +5,16 @@ import type { ExpoConfig } from 'expo/config'
  *
  * Every identity string lives in ONE place so the eventual rename is a one-file
  * change rather than a grep across the codebase. `Nut AI` was chosen over the
- * research documents' working codename `Tally`.
+ * research documents' working codename `Tally`; renamed again to `Optimal AI`
+ * once the app grew past food logging into exercise, sleep, and body tracking.
+ *
+ * SLUG, BUNDLE_ID and SCHEME deliberately did NOT change with the display
+ * name: the bundle identifier is what ties this build to its existing
+ * TestFlight/App Store Connect record, its HealthKit entitlement, and every
+ * install already on a device. Changing it would make Apple treat this as a
+ * brand-new app with no history, not a renamed one.
  */
-const NAME = 'Nut AI'
+const NAME = 'Optimal AI'
 const SLUG = 'nut-ai'
 const BUNDLE_ID = 'com.nutai.app'
 const SCHEME = 'nutai'
@@ -31,9 +38,9 @@ const config: ExpoConfig = {
   name: NAME,
   slug: SLUG,
   version: '0.1.0',
-  // The mark: a white peanut silhouette inside four scan-frame corners on
+  // The mark: a white upward peak inside four scan-frame corners on
   // near-black. Source of truth is assets/icon.svg; the PNGs are rendered
-  // from it (rsvg-convert), never hand-edited.
+  // from it, never hand-edited.
   icon: './assets/icon.png',
   orientation: 'portrait',
   // Deep links carry widget taps and notification actions straight to a screen.
@@ -51,11 +58,11 @@ const config: ExpoConfig = {
       // so there is no non-exempt encryption to declare.
       ITSAppUsesNonExemptEncryption: false,
       NSCameraUsageDescription:
-        'Nut AI uses your camera to photograph meals and scan barcodes. Photos stay on your device unless you choose a cloud provider during setup.',
+        `${NAME} uses your camera to photograph meals and scan barcodes. Photos stay on your device unless you choose a cloud provider during setup.`,
       NSPhotoLibraryUsageDescription:
-        'Nut AI can read a meal photo you already took. Photos stay on your device unless you choose a cloud provider during setup.',
+        `${NAME} can read a meal photo you already took. Photos stay on your device unless you choose a cloud provider during setup.`,
       NSFaceIDUsageDescription:
-        'Nut AI uses Face ID only when you reveal or edit a stored API key — never to log a meal.',
+        `${NAME} uses Face ID only when you reveal or edit a stored API key — never to log a meal.`,
     },
   },
 
@@ -71,7 +78,7 @@ const config: ExpoConfig = {
 
   plugins: [
     'expo-router',
-    ['expo-camera', { cameraPermission: 'Nut AI uses your camera to photograph meals and scan barcodes.' }],
+    ['expo-camera', { cameraPermission: `${NAME} uses your camera to photograph meals and scan barcodes.` }],
     'expo-secure-store',
     'expo-sqlite',
     ...(SKIP_HEALTHKIT
@@ -83,9 +90,9 @@ const config: ExpoConfig = {
               // Both strings are required by App Review, and they must describe what we
               // actually do rather than what HealthKit could theoretically allow.
               NSHealthShareUsageDescription:
-                'Nut AI reads your steps, workouts and weight so your calorie target reflects what you actually did, instead of a fixed guess.',
+                `${NAME} reads your steps, workouts, weight, sleep and respiratory rate so your calorie target and daily summary reflect what you actually did, instead of a fixed guess.`,
               NSHealthUpdateUsageDescription:
-                'Nut AI writes the meals you log to Health so your nutrition data lives alongside the rest of your health record.',
+                `${NAME} writes the meals you log to Health so your nutrition data lives alongside the rest of your health record.`,
               // Background delivery is deliberately off. It is an extra entitlement, it
               // is a battery cost, and nothing here needs to react to a step count
               // while the app is closed.

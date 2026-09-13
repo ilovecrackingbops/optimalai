@@ -1,7 +1,9 @@
 import { CameraView, useCameraPermissions } from 'expo-camera'
-import { router } from 'expo-router'
+import { Image } from 'expo-image'
+import * as ImagePicker from 'expo-image-picker'
+import { router, useLocalSearchParams } from 'expo-router'
 import { useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon, type IconName } from '../src/components/Icon'
 import { startBarcodeScan, startLabelScan, startReceiptScan, startScan } from '../src/scan/orchestrator'
@@ -36,12 +38,29 @@ const MODES: Array<{ id: CameraMode; label: string; icon: IconName }> = [
 export default function Camera() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  // Set only when this screen was opened from Home's "Log meal" sheet for a
+  // day other than today — every hand-off to /result carries it along so the
+  // eventual log lands on THAT day instead of whenever the scan finishes.
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
   const [permission, requestPermission] = useCameraPermissions()
   const cameraRef = useRef<CameraView>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<CameraMode>('food')
   // Barcode frames arrive continuously; only the FIRST detection may fire.
   const barcodeFired = useRef(false)
+  // Food-mode only: the captured photo waiting on an optional typed note before
+  // it is handed to the model. Every other mode hands off immediately.
+  const [describeUri, setDescribeUri] = useState<string | null>(null)
+  const [note, setNote] = useState('')
+
+  /** Every hand-off to the result screen goes through here so `forDate` is never forgotten on one path. */
+  function goToResult() {
+    if (forDate) {
+      router.replace({ pathname: '/result', params: { forDate } } as never)
+    } else {
+      router.replace('/result')
+    }
+  }
 
   if (!permission) return <View style={{ flex: 1, backgroundColor: '#000' }} />
 
@@ -49,7 +68,7 @@ export default function Camera() {
     return (
       <View style={[styles.center, { backgroundColor: theme.bg, paddingTop: insets.top }]}>
         <Text style={[type.heading, { color: theme.text, textAlign: 'center' }]}>
-          Nut AI needs your camera
+          Optimal AI needs your camera
         </Text>
         <Text style={[type.caption, { color: theme.textMuted, textAlign: 'center', marginTop: space.sm }]}>
           Photos stay on your device unless you chose a cloud provider during setup.
@@ -67,32 +86,70 @@ export default function Camera() {
     )
   }
 
+  /** Shared by the shutter and the library picker — same handoff either way. */
+  function handlePhoto(uri: string) {
+    // The draft exists from this moment. Everything after can fail safely.
+    setPhase({ kind: 'captured', photoUri: uri })
+
+    if (mode === 'label') {
+      goToResult()
+      void startLabelScan(uri)
+      return
+    }
+    if (mode === 'receipt') {
+      goToResult()
+      void startReceiptScan(uri)
+      return
+    }
+    // Food mode: pause for an optional typed note before handing off — it
+    // measurably disambiguates the model's read of the photo. Skippable, so
+    // it never slows down someone who has nothing to add.
+    setDescribeUri(uri)
+  }
+
   async function capture() {
     if (busy) return
     setBusy(true)
     try {
       const shot = await cameraRef.current?.takePictureAsync({ quality: 1, skipProcessing: false })
       if (!shot?.uri) return
-
-      // The draft exists from this moment. Everything after can fail safely.
-      setPhase({ kind: 'captured', photoUri: shot.uri })
-
-      // Navigate NOW. Preprocessing, the model call and the pipeline all run
-      // behind the result screen's progress states — the user never stares at
-      // a frozen viewfinder wondering whether the shutter worked.
-      router.replace('/result')
-      if (mode === 'label') void startLabelScan(shot.uri)
-      else if (mode === 'receipt') void startReceiptScan(shot.uri)
-      else void startScan(shot.uri)
+      handlePhoto(shot.uri)
     } finally {
       setBusy(false)
     }
   }
 
+  async function pickFromLibrary() {
+    if (busy) return
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
+    if (!perm.granted) return
+    setBusy(true)
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ quality: 1, allowsEditing: false })
+      if (result.canceled || !result.assets?.[0]?.uri) return
+      handlePhoto(result.assets[0].uri)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function continueFoodScan(noteOverride?: string) {
+    const uri = describeUri
+    if (!uri) return
+    setDescribeUri(null)
+    const trimmed = (noteOverride ?? note).trim()
+    setNote('')
+    // Navigate NOW. Preprocessing, the model call and the pipeline all run
+    // behind the result screen's progress states — the user never stares at
+    // a frozen screen wondering whether the shutter worked.
+    goToResult()
+    void startScan(uri, trimmed || undefined)
+  }
+
   function onBarcode(data: string) {
     if (barcodeFired.current || !data) return
     barcodeFired.current = true
-    router.replace('/result')
+    goToResult()
     void startBarcodeScan(data)
   }
 
@@ -131,13 +188,25 @@ export default function Camera() {
         {mode === 'barcode' ? (
           <Text style={[type.caption, styles.hint]}>Point at the barcode — it scans on its own</Text>
         ) : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Take photo"
-            onPress={capture}
-            disabled={busy}
-            style={[styles.shutter, busy && { opacity: 0.5 }]}
-          />
+          <View style={styles.shutterRow}>
+            <View style={{ width: 52 }} />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Take photo"
+              onPress={capture}
+              disabled={busy}
+              style={[styles.shutter, busy && { opacity: 0.5 }]}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Choose from photo library"
+              onPress={() => void pickFromLibrary()}
+              disabled={busy}
+              style={[styles.libraryBtn, busy && { opacity: 0.5 }]}
+            >
+              <Icon name="bookmark" size={22} color="#fff" />
+            </Pressable>
+          </View>
         )}
       </View>
 
@@ -150,12 +219,70 @@ export default function Camera() {
       >
         <Text style={{ color: '#fff', fontSize: 22 }}>×</Text>
       </Pressable>
+
+      {describeUri ? (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[styles.describeOverlay, { paddingTop: insets.top + space.xl, paddingBottom: Math.max(insets.bottom, space.xl) }]}
+        >
+          <Image source={{ uri: describeUri }} style={styles.describePhoto} />
+          <Text style={[type.heading, { color: '#fff', marginTop: space.xl }]}>Add a note?</Text>
+          <Text style={[type.caption, styles.hint, { paddingVertical: space.xs }]}>
+            Optional — a rough weight or what's under the sauce helps the AI a lot
+          </Text>
+          <TextInput
+            autoFocus
+            placeholder="e.g. about 300g of rice, chicken breast not thigh"
+            placeholderTextColor="rgba(255,255,255,0.5)"
+            value={note}
+            onChangeText={setNote}
+            onSubmitEditing={() => continueFoodScan()}
+            returnKeyType="done"
+            style={styles.describeInput}
+          />
+          <View style={{ flex: 1 }} />
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => continueFoodScan()}
+            style={[styles.primary, { backgroundColor: '#fff' }]}
+          >
+            <Text style={[type.bodyStrong, { color: '#000' }]}>{note.trim() ? 'Add & scan' : 'Scan'}</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => continueFoodScan('')}
+            hitSlop={space.md}
+            style={{ alignSelf: 'center', marginTop: space.md }}
+          >
+            <Text style={[type.body, { color: 'rgba(255,255,255,0.8)' }]}>Skip</Text>
+          </Pressable>
+        </KeyboardAvoidingView>
+      ) : null}
     </View>
   )
 }
 
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl },
+  describeOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    paddingHorizontal: space.lg,
+  },
+  describePhoto: { width: 96, height: 96, borderRadius: radius.lg, alignSelf: 'center' },
+  describeInput: {
+    marginTop: space.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    borderRadius: radius.md,
+    padding: space.md,
+    minHeight: 56,
+    fontSize: 16,
+    color: '#fff',
+  },
   primary: {
     paddingHorizontal: space.xl,
     paddingVertical: space.md,
@@ -164,6 +291,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   controls: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', gap: space.lg },
+  shutterRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xl },
+  libraryBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   // 2x2 — four pills in one row overflow both screen edges on every iPhone.
   modeRow: {
     flexDirection: 'row',

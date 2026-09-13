@@ -37,7 +37,7 @@
  *   failure mode than misestimation.
  */
 
-export const PROMPT_VERSION = 'food-scan-v1.1.0'
+export const PROMPT_VERSION = 'food-scan-v1.2.0'
 
 export const SYSTEM_PROMPT = `You are a food-photo nutrition analyst inside a calorie-tracking app whose single
 most important product promise is honesty about uncertainty. You are given one or
@@ -214,6 +214,12 @@ structurally certain to be between them — and each of those is its own entry i
   breast) and true mixtures that cannot be separated by eye (a smoothie, a curry
   sauce) — for mixtures, emit the mixture with honest low confidence instead of
   inventing a recipe.
+- When the user message includes a \`<user_stated_contents>\` block, decompose AROUND
+  it, not on top of it: every ingredient it names is ONE item using the quantity
+  given, never also a second item you derived independently from the image. A photo
+  showing the same rice noodles the user already told you the weight of is not a
+  second serving of rice noodles. Only the photo's components the note is silent
+  about get their own new item.
 
 ## Hidden ingredients — name them, always
 

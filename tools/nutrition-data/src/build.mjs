@@ -18,7 +18,7 @@
  */
 
 import { createReadStream } from 'node:fs'
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,6 +64,7 @@ const EXPECTED_HEADERS = {
     'portion_description', 'modifier', 'gram_weight',
   ],
   'measure_unit.csv': ['id', 'name'],
+  'food_category.csv': ['id', 'code', 'description'],
 }
 
 /** FDC nutrient ids, verified present in nutrient.csv. */
@@ -76,6 +77,28 @@ const N = {
   sugar_g: 2000,
   sodium_mg: 1093,
   sat_fat_g: 1258,
+}
+
+/**
+ * Headline micronutrients, stored in the sparse `food_micros` EAV table.
+ * `dvAmount` is the FDA adult daily value the app uses to decide whether a
+ * food's contribution is worth mentioning ("beef gives iron") — this is the
+ * same reference set nutrition labels use, not a made-up threshold.
+ */
+const MICRO_NUTRIENTS = {
+  iron_mg: { id: 1089, unit: 'mg', label: 'Iron', dvAmount: 18 },
+  vitamin_b12_ug: { id: 1178, unit: 'µg', label: 'Vitamin B12', dvAmount: 2.4 },
+  choline_mg: { id: 1180, unit: 'mg', label: 'Choline', dvAmount: 550 },
+  zinc_mg: { id: 1095, unit: 'mg', label: 'Zinc', dvAmount: 11 },
+  vitamin_d_ug: { id: 1114, unit: 'µg', label: 'Vitamin D', dvAmount: 20 },
+  magnesium_mg: { id: 1090, unit: 'mg', label: 'Magnesium', dvAmount: 420 },
+  potassium_mg: { id: 1092, unit: 'mg', label: 'Potassium', dvAmount: 4700 },
+  vitamin_a_rae_ug: { id: 1106, unit: 'µg', label: 'Vitamin A', dvAmount: 900 },
+  vitamin_c_mg: { id: 1162, unit: 'mg', label: 'Vitamin C', dvAmount: 90 },
+  calcium_mg: { id: 1087, unit: 'mg', label: 'Calcium', dvAmount: 1300 },
+  folate_ug: { id: 1177, unit: 'µg', label: 'Folate', dvAmount: 400 },
+  vitamin_b6_mg: { id: 1175, unit: 'mg', label: 'Vitamin B6', dvAmount: 1.7 },
+  selenium_ug: { id: 1103, unit: 'µg', label: 'Selenium', dvAmount: 55 },
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +181,14 @@ async function ingest(dir, sourceLabel, state) {
   }
   console.log(`  ${sourceLabel}: all ${files.length} headers validated`)
 
+  // USDA's own official 28-category taxonomy — the ONE reliable, structured
+  // signal for "is this a whole ingredient or a branded/restaurant/prepared
+  // product" that does not depend on guessing from a name string.
+  const categories = new Map()
+  await readCsv(join(dir, 'food_category.csv'), (r) => {
+    categories.set(r.id, r.description ?? null)
+  })
+
   // Which fdc_ids belong to this tier. The Foundation download also carries
   // sample/acquisition rows that are NOT foods and must not become corpus rows.
   const keep = new Set()
@@ -172,6 +203,7 @@ async function ingest(dir, sourceLabel, state) {
           source: dt === 'foundation_food' ? 'fdc_foundation'
                 : dt === 'sr_legacy_food' ? 'fdc_sr_legacy' : 'fdc_fndds',
           name: r.description ?? '',
+          category: categories.get(r.food_category_id) ?? null,
           publicationDate: r.publication_date ?? null,
           nutrients: {},
         })
@@ -181,19 +213,34 @@ async function ingest(dir, sourceLabel, state) {
   console.log(`  ${sourceLabel}: ${keep.size} food rows`)
 
   const wanted = new Map(Object.entries(N).map(([k, v]) => [String(v), k]))
+  const wantedMicros = new Map(Object.entries(MICRO_NUTRIENTS).map(([code, m]) => [String(m.id), code]))
   let nutrientRows = 0
+  let microRows = 0
   await readCsv(join(dir, 'food_nutrient.csv'), (r) => {
     const fid = r.fdc_id
     if (!keep.has(fid)) return
+
     const field = wanted.get(r.nutrient_id)
-    if (!field) return
-    const amount = num(r.amount)
-    // NULL stays NULL. A missing nutrient is not a zero nutrient.
-    if (amount == null) return
-    const f = state.foods.get(fid)
-    if (f) { f.nutrients[field] = amount; nutrientRows++ }
+    if (field) {
+      const amount = num(r.amount)
+      // NULL stays NULL. A missing nutrient is not a zero nutrient.
+      if (amount != null) {
+        const f = state.foods.get(fid)
+        if (f) { f.nutrients[field] = amount; nutrientRows++ }
+      }
+      return
+    }
+
+    const microCode = wantedMicros.get(r.nutrient_id)
+    if (microCode) {
+      const amount = num(r.amount)
+      if (amount != null && state.foods.has(fid)) {
+        state.micros.push({ fdcId: fid, code: microCode, amount })
+        microRows++
+      }
+    }
   })
-  console.log(`  ${sourceLabel}: ${nutrientRows} nutrient values`)
+  console.log(`  ${sourceLabel}: ${nutrientRows} nutrient values, ${microRows} micronutrient values`)
 
   const units = new Map()
   await readCsv(join(dir, 'measure_unit.csv'), (r) => units.set(r.id, r.name))
@@ -217,10 +264,87 @@ async function ingest(dir, sourceLabel, state) {
   console.log(`  ${sourceLabel}: ${portions} portion records`)
 }
 
+/**
+ * A food's first comma-segment is a company name when USDA's own SR Legacy
+ * naming convention marks it as one: ALL-CAPS ("KFC, Fried Chicken...",
+ * "BURGER KING, ...") or the "Mc"-prefixed exception ("McDONALD'S, ..."). Every
+ * generic USDA row instead leads with the food itself ("Chicken, broiler or
+ * fryers, breast, ..."), so this is a verified structural signal read off the
+ * actual data, not a guessed brand list.
+ */
+function brandSegment(name) {
+  const comma = name.indexOf(',')
+  if (comma <= 0) return false
+  const seg = name.slice(0, comma).trim()
+  if (seg.length < 2) return false
+  if (/^Mc[A-Z]/.test(seg)) return true
+  return /[A-Z]/.test(seg) && seg === seg.toUpperCase() && seg !== seg.toLowerCase()
+}
+
+/**
+ * `popularity_rank` is a GENERICNESS prior, not measured usage — this app has no
+ * server and collects no telemetry, so no real popularity signal exists to rank
+ * by. Rank 1 goes to the row most likely to be "the" plain answer to a staple
+ * query: Foundation Foods first (USDA's newer, more consistently curated tier),
+ * then SR Legacy's own generic entries, with restaurant/branded rows (identified
+ * by `brandSegment`, above) and "Fast foods"/"Restaurant" category rows sent to
+ * the back. This directly fixes the reported bug where searching a plain staple
+ * like "chicken breast" surfaced KFC and Oscar Mayer rows ahead of the actual
+ * plain USDA cut — a previous build set popularity_rank to raw insertion order,
+ * which carried no signal at all.
+ */
+/**
+ * Same processed-FORM marker as @nutai/resolver's wholeFoodPrior (duplicated
+ * rather than imported — this file runs as plain Node/JS outside the
+ * TypeScript workspace graph). A manufactured form of an ingredient (a tender,
+ * a nugget, a deli slice) ranks below the plain ingredient itself.
+ */
+const PROCESSED_FORM = /\b(tenders?|nuggets?|patt(?:y|ies)|breaded|sausages?|link|deli|luncheon|roll|loaf|spread|jerky|hot ?dogs?|bologna|glazed|fat-free|smoked)\b/i
+
+/**
+ * USDA's own category, not a guess: a row filed under one of these IS a
+ * branded product, a restaurant menu item, or a multi-ingredient prepared
+ * dish, regardless of how its name reads. This is what actually stops
+ * "steak" from surfacing Cracker Barrel and Denny's ahead of a plain cut of
+ * beef — name-pattern brand detection (`brandSegment`, above) only catches
+ * ALL-CAPS chains; it has no way to know "Restaurant, family style, sirloin
+ * steak" or a Branded Food Products Database row is not a plain ingredient.
+ */
+const LOW_PRIORITY_CATEGORIES = new Set([
+  'Fast Foods',
+  'Restaurant Foods',
+  'Branded Food Products Database',
+  'Meals, Entrees, and Side Dishes',
+  'Sausages and Luncheon Meats',
+])
+
+function genericityBucket(f) {
+  if (f.source === 'fdc_foundation') return 0
+  if (f.category != null && LOW_PRIORITY_CATEGORIES.has(f.category)) return 3
+  if (brandSegment(f.name)) return 3
+  if (PROCESSED_FORM.test(f.name)) return 2
+  return 1
+}
+
+function assignPopularityRanks(foods) {
+  const ordered = [...foods].sort((a, b) => {
+    const bucket = genericityBucket(a) - genericityBucket(b)
+    if (bucket !== 0) return bucket
+    // Within a bucket, a shorter, plainer description is likelier to be the
+    // "regular" version of the food than a heavily qualified one.
+    const len = a.name.length - b.name.length
+    if (len !== 0) return len
+    return a.name.localeCompare(b.name)
+  })
+  const rank = new Map()
+  ordered.forEach((f, i) => rank.set(f.fdcId, i + 1))
+  return rank
+}
+
 async function main() {
   console.log('nutai-nutrition-data — building the generic tier\n')
 
-  const state = { foods: new Map(), portions: [] }
+  const state = { foods: new Map(), portions: [], micros: [] }
 
   const resolved = []
   for (const source of SOURCES) {
@@ -267,11 +391,11 @@ async function main() {
   db.exec(NUTRITION_FTS_SCHEMA)
 
   const insertFood = db.prepare(`
-    INSERT INTO foods (id, source, source_id, name, basis, basis_confidence,
-                       energy_kcal, protein_g, fat_g, sat_fat_g, carb_g, fiber_g,
+    INSERT INTO foods (id, source, source_id, name, category, basis, basis_confidence,
+                       serving_size_g, energy_kcal, protein_g, fat_g, sat_fat_g, carb_g, fiber_g,
                        sugar_g, sodium_mg, completeness_score, popularity_rank,
                        license, updated_at)
-    VALUES (?, ?, ?, ?, 'per_100g', 'high', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CC0', ?)
+    VALUES (?, ?, ?, ?, ?, 'per_100g', 'high', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CC0', ?)
   `)
   const insertFts = db.prepare('INSERT INTO food_fts (rowid, name, brand, synonyms) VALUES (?,?,?,?)')
   const insertTri = db.prepare('INSERT INTO food_fts_trigram (rowid, name) VALUES (?,?)')
@@ -279,6 +403,21 @@ async function main() {
     INSERT INTO food_portions (food_id, measure_unit, modifier, amount, gram_weight, is_fndds_default)
     VALUES (?,?,?,?,?,?)
   `)
+  const insertMicro = db.prepare('INSERT INTO food_micros (food_id, nutrient_code, amount) VALUES (?,?,?)')
+
+  // A per-food "typical serving" in grams, read BEFORE the foods insert loop so
+  // it can ride along on the same row rather than needing a second pass. Prefers
+  // the FNDDS default portion (seq_num 1) and falls back to the smallest recorded
+  // portion — the same preference order resolveSelection() uses at query time.
+  const servingByFdcId = new Map()
+  for (const p of state.portions) {
+    const existing = servingByFdcId.get(p.fdcId)
+    if (!existing || (p.seqNum === 1 && existing.seqNum !== 1) || (existing.seqNum !== 1 && p.gramWeight < existing.gramWeight)) {
+      servingByFdcId.set(p.fdcId, p)
+    }
+  }
+
+  const popularityRanks = assignPopularityRanks(state.foods.values())
 
   const idMap = new Map()
   let rowId = 0
@@ -296,12 +435,15 @@ async function main() {
 
       const present = ['energy_kcal', 'protein_g', 'fat_g', 'carb_g'].filter((k) => n[k] != null).length
       const completeness = present / 4
+      const servingSizeG = servingByFdcId.get(f.fdcId)?.gramWeight ?? null
+      const rank = popularityRanks.get(f.fdcId) ?? rowId
 
       insertFood.run(
-        rowId, f.source, f.fdcId, f.name,
+        rowId, f.source, f.fdcId, f.name, f.category ?? null,
+        servingSizeG,
         n.energy_kcal ?? null, n.protein_g ?? null, n.fat_g ?? null, n.sat_fat_g ?? null,
         n.carb_g ?? null, n.fiber_g ?? null, n.sugar_g ?? null, n.sodium_mg ?? null,
-        completeness, rowId, now,
+        completeness, rank, now,
       )
       insertFts.run(rowId, f.name, '', '')
       insertTri.run(rowId, f.name)
@@ -311,6 +453,12 @@ async function main() {
       const fid = idMap.get(p.fdcId)
       if (!fid) continue
       insertPortion.run(fid, p.measureUnit, p.modifier, p.amount, p.gramWeight, p.seqNum === 1 ? 1 : 0)
+    }
+
+    for (const m of state.micros) {
+      const fid = idMap.get(m.fdcId)
+      if (!fid) continue
+      insertMicro.run(fid, m.code, m.amount)
     }
   })
   tx()
@@ -339,6 +487,22 @@ async function main() {
   console.log(`  foods:    ${counts.foods}`)
   console.log(`  portions: ${counts.portions}`)
   console.log(`  size:     ${(size / 1024 / 1024).toFixed(1)} MB`)
+
+  // expo-sqlite's importDatabaseFromAssetAsync is idempotent BY FILENAME: once
+  // a device has ever imported "nutrition.db", it never re-copies it, even
+  // across app updates that ship a rebuilt corpus with different content —
+  // "re-copying 4.7 MB on every cold start would be a visible delay for
+  // nothing" is true for an unchanged corpus and silently wrong for a changed
+  // one. This constant lets the app compare what is ON DEVICE against what
+  // THIS BUILD shipped, so it can tell the difference and re-import only when
+  // the content actually moved.
+  const versionFile = join(REPO, 'apps/mobile/src/db/nutrition-version.ts')
+  await writeFile(
+    versionFile,
+    `// Auto-generated by tools/nutrition-data/src/build.mjs — do not hand-edit.\n` +
+      `export const NUTRITION_DB_BUILT_AT = ${JSON.stringify(new Date(now).toISOString())}\n`,
+  )
+  console.log('  version:  ', versionFile)
 }
 
 main().catch((err) => {

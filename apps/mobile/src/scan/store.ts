@@ -128,6 +128,26 @@ export function setPortionEaten(fraction: number) {
 }
 
 /**
+ * USDA's own naming carries the cooking state in the row name — "Chicken,
+ * breast, raw" vs "..., cooked, roasted" are different rows with different
+ * per-100g values. Same detection the resolver's own rawPreference signal
+ * uses (packages/resolver/src/scoring.ts), reused here to figure out which
+ * basis the MATCHED row assumes, so answering "raw" or "cooked" has something
+ * to reconcile against.
+ */
+const RAW_NAME = /\b(raw|uncooked)\b/i
+const COOKED_NAME =
+  /\b(cooked|roasted|grilled|boiled|steamed|baked|broiled|stewed|poached|braised|fried|rotisserie|bbq|barbecue|smoked|toasted|simmered)\b/i
+
+/**
+ * A standard cooking-yield approximation (~25% mass lost to moisture) — not a
+ * per-food precise table (gram-engine's yields.ts has that, but it keys off
+ * fields IngredientRow does not carry post-resolution), just enough to turn
+ * "raw or cooked" from a dead button into a real, defensible correction.
+ */
+const STANDARD_COOKING_YIELD = 0.75
+
+/**
  * Answering a clarifying chip IS an add/remove/edit operation.
  *
  * "Yes there was oil" pushes an assumption-filler row; "no oil" removes it; "oat
@@ -147,6 +167,43 @@ export function answerQuestion(q: SelectedQuestion, value: string) {
       const oil = phase.result.meal.ingredients.find((r) => r.origin === 'assumption_filler')
       if (oil) removeRow(oil.id)
     }
+    return
+  }
+  if (q.question.id === 'regular_or_diet') {
+    // Only 'diet' changes anything — 'regular' just confirms the silent
+    // default the row was already logged at. Previously NEITHER option did
+    // anything: this question fell through to the "wired at the screen
+    // level" case below, but no screen ever wired it, so both buttons were
+    // silently inert.
+    if (value !== 'diet') return
+    if (phase.kind !== 'ready' || q.rowId == null) return
+    mutateMeal((meal) => ({
+      ...meal,
+      ingredients: meal.ingredients.map((r) =>
+        r.id === q.rowId
+          ? {
+              ...r,
+              // Diet/zero soda: USDA-typical values, effectively calorie-free.
+              nutrientSnapshot: { kcal: 0, protein_g: 0, fat_g: 0, carbs_g: 0, fiber_g: 0, sugar_g: 0, sodium_mg: r.nutrientSnapshot.sodium_mg },
+              isEstimate: true,
+            }
+          : r,
+      ),
+    }))
+    return
+  }
+  if (q.question.id === 'raw_or_cooked') {
+    if (phase.kind !== 'ready' || q.rowId == null) return
+    const row = phase.result.meal.ingredients.find((r) => r.id === q.rowId)
+    if (!row) return
+    const matchedRaw = RAW_NAME.test(row.displayName)
+    const matchedCooked = COOKED_NAME.test(row.displayName)
+    // Can't tell what basis the matched row itself assumes — nothing to reconcile.
+    if (!matchedRaw && !matchedCooked) return
+    const statedRaw = value === 'raw'
+    if (statedRaw === matchedRaw) return // already consistent with the match
+    const grams = matchedCooked ? row.grams * STANDARD_COOKING_YIELD : row.grams / STANDARD_COOKING_YIELD
+    editGrams(row.id, grams)
     return
   }
   // Remaining answers swap a row's snapshot against a bundled filler food. That

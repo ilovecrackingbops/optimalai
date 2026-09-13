@@ -67,6 +67,7 @@ export type IconName =
   | 'heart'
   | 'clock'
   | 'target'
+  | 'moon'
   | 'dot1'
   | 'dot3'
   | 'dot6'
@@ -446,6 +447,8 @@ function render(name: IconName, c: string, s: Common) {
           <Circle cx="12" cy="12" r="1.4" fill={c} stroke="none" />
         </G>
       )
+    case 'moon':
+      return <Path {...s} d="M18.5 14.5A8.5 8.5 0 1 1 9.5 5.5a6.8 6.8 0 0 0 9 9Z" />
     case 'dot1':
       return <Circle cx="12" cy="12" r="2.6" fill={c} stroke="none" />
     case 'dot3':

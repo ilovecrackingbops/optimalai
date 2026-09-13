@@ -6,8 +6,11 @@ import {
   computeCalorieTarget,
   computeMacros,
   computeTrend,
+  ffmi,
+  harrisBenedict,
   isDayCompleteEnough,
   katchMcArdle,
+  KCAL_PER_LB,
   mifflinStJeor,
   safeFloor,
   TARGET_CHANGE_THRESHOLD_KCAL,
@@ -42,6 +45,41 @@ describe('BMR', () => {
   it('computes Katch-McArdle from lean mass when body fat is supplied', () => {
     // 370 + 21.6 * (80 * 0.8) = 370 + 1382.4
     expect(katchMcArdle(80, 0.2)).toBeCloseTo(1752.4, 6)
+  })
+
+  it('defaults to Mifflin when no equation and no body fat are given, unchanged from before', () => {
+    expect(computeBmr(body)).toBeCloseTo(mifflinStJeor(body), 6)
+  })
+
+  it('switches its own default to Katch-McArdle the moment a body fat figure exists — no separate toggle', () => {
+    const withBodyFat = { ...body, bodyFatFraction: 0.2 }
+    expect(computeBmr(withBodyFat)).toBeCloseTo(katchMcArdle(80, 0.2), 6)
+    // And it must actually differ from what Mifflin would have said, or this
+    // test would pass by coincidence rather than by using the right formula.
+    expect(computeBmr(withBodyFat)).not.toBeCloseTo(mifflinStJeor(withBodyFat), 1)
+  })
+
+  it('an explicit equation always wins over the body-fat-driven default', () => {
+    const withBodyFat = { ...body, bodyFatFraction: 0.2 }
+    expect(computeBmr(withBodyFat, 'mifflin')).toBeCloseTo(mifflinStJeor(withBodyFat), 6)
+    expect(computeBmr(withBodyFat, 'harris')).toBeCloseTo(harrisBenedict(withBodyFat), 6)
+  })
+})
+
+describe('computeCalorieTarget picks up a body-fat figure end to end', () => {
+  it('a full target run sharpens its BMR the same way computeBmr does on its own', () => {
+    const withoutBf = computeCalorieTarget({ ...body, activity: 'sedentary', goal: 'maintain', rateLbPerWeek: 0 })
+    const withBf = computeCalorieTarget({
+      ...body,
+      bodyFatFraction: 0.15,
+      activity: 'sedentary',
+      goal: 'maintain',
+      rateLbPerWeek: 0,
+    })
+    expect(withBf.bmr).toBeCloseTo(katchMcArdle(body.weightKg, 0.15), 6)
+    expect(withBf.bmr).not.toBeCloseTo(withoutBf.bmr, 0)
+    // TDEE and the eventual target must move with it, not just the raw BMR field.
+    expect(withBf.tdee).not.toBeCloseTo(withoutBf.tdee, 0)
   })
 })
 
@@ -114,6 +152,21 @@ describe('TDEE', () => {
     const gain = computeCalorieTarget({ ...body, activity: 'moderate', goal: 'gain', rateLbPerWeek: 1 })
     expect(gain.targetRaw - lose.tdee).toBeCloseTo(lose.tdee - lose.targetRaw, 6)
   })
+
+  it('the four pace presets the target-weight screen offers each imply a distinct, correct daily delta', () => {
+    // Locks in KCAL_PER_LB / 7 arithmetic against the exact presets the UI
+    // hard-codes (0.3 / 0.5 / 0.625 / 1 lb/week) — a change to either side
+    // silently going out of sync is exactly the bug this guards against.
+    const presets = [0.3, 0.5, 0.625, 1] as const
+    const deltas = presets.map(
+      (rate) => computeCalorieTarget({ ...body, activity: 'moderate', goal: 'lose', rateLbPerWeek: rate }).dailyDelta,
+    )
+    for (const [i, rate] of presets.entries()) {
+      expect(deltas[i]).toBeCloseTo((rate * KCAL_PER_LB) / 7, 6)
+    }
+    // Strictly increasing: a faster pace must never imply a smaller gap.
+    for (let i = 1; i < deltas.length; i++) expect(deltas[i]!).toBeGreaterThan(deltas[i - 1]!)
+  })
 })
 
 describe('macros — carbs are always the derived variable', () => {
@@ -138,12 +191,75 @@ describe('macros — carbs are always the derived variable', () => {
     expect(m.carbs_g).toBe(0)
     expect(m.carbsFloored).toBe(true)
   })
+
+  it('a custom percentage split overrides the weight-based default exactly', () => {
+    const m = computeMacros(2000, 80, 'lose', { proteinPct: 30, fatPct: 30 })
+    expect(m.protein_g).toBeCloseTo((0.3 * 2000) / 4, 6)
+    expect(m.fat_g).toBeCloseTo((0.3 * 2000) / 9, 6)
+    // Carbs is still the reconciled remainder, not an independently computed 40%.
+    expect(4 * m.protein_g + 4 * m.carbs_g + 9 * m.fat_g).toBeCloseTo(2000, 6)
+  })
+
+  it('a custom split ignores bodyweight entirely — the whole point of asking for it', () => {
+    const light = computeMacros(2000, 60, 'lose', { proteinPct: 25, fatPct: 25 })
+    const heavy = computeMacros(2000, 120, 'lose', { proteinPct: 25, fatPct: 25 })
+    expect(light.protein_g).toBeCloseTo(heavy.protein_g, 6)
+    expect(light.fat_g).toBeCloseTo(heavy.fat_g, 6)
+  })
+
+  it('a custom split still floors carbs at zero and flags it the same way', () => {
+    const m = computeMacros(1000, 80, 'lose', { proteinPct: 60, fatPct: 45 })
+    expect(m.carbs_g).toBe(0)
+    expect(m.carbsFloored).toBe(true)
+  })
 })
 
 describe('BMI note', () => {
   it('computes BMI and identifies an underweight goal', () => {
     expect(bmi(70, 175)).toBeCloseTo(22.86, 2)
     expect(bmi(50, 175)).toBeLessThan(UNDERWEIGHT_BMI)
+  })
+})
+
+describe('FFMI', () => {
+  it('derives fat-free mass index from weight, height, and hand-entered body fat', () => {
+    // 90 kg at 15% body fat -> 76.5 kg fat-free mass, over 1.8m^2.
+    const r = ffmi(90, 180, 15)
+    expect(r.raw).toBeCloseTo(76.5 / (1.8 * 1.8), 4)
+  })
+
+  it('applies the +6.1 * (1.8 - heightM) offset exactly', () => {
+    const r = ffmi(70, 165, 12)
+    const heightM = 1.65
+    const expectedRaw = (70 * 0.88) / (heightM * heightM)
+    expect(r.raw).toBeCloseTo(expectedRaw, 6)
+    expect(r.normalized).toBeCloseTo(expectedRaw + 6.1 * (1.8 - heightM), 6)
+    // Shorter than the 1.8m anchor: normalization adds, so it reads higher
+    // than the unadjusted raw score.
+    expect(r.normalized).toBeGreaterThan(r.raw)
+  })
+
+  it('normalizes a taller-than-anchor height DOWN, correcting for height alone', () => {
+    // Same raw FFMI at two different heights (by construction) is not the
+    // same normalized score — the taller person's raw number owes more to
+    // height, so normalization discounts it relative to the 1.8m anchor.
+    const raw20At165 = ffmi(20 * 1.65 * 1.65, 165, 0).raw
+    const raw20At195 = ffmi(20 * 1.95 * 1.95, 195, 0).raw
+    expect(raw20At165).toBeCloseTo(raw20At195, 6)
+    expect(ffmi(20 * 1.65 * 1.65, 165, 0).normalized).toBeGreaterThan(
+      ffmi(20 * 1.95 * 1.95, 195, 0).normalized,
+    )
+  })
+
+  it('is exactly the raw value at 1.8m, since that is the normalization anchor', () => {
+    const r = ffmi(83.5, 180, 10)
+    expect(r.normalized).toBeCloseTo(r.raw, 6)
+  })
+
+  it('rises as body fat is entered lower for the same scale weight', () => {
+    const leaner = ffmi(80, 178, 10)
+    const fattier = ffmi(80, 178, 25)
+    expect(leaner.normalized).toBeGreaterThan(fattier.normalized)
   })
 })
 

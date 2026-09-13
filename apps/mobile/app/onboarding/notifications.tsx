@@ -23,7 +23,7 @@ export default function NotificationsScreen() {
     <OnboardingScreen
       step={stepIndex('notifications')}
       total={TOTAL_STEPS}
-      title="Stay on track with Nut AI"
+      title="Stay on track with Optimal AI"
       onCta={() => router.push(nextRoute('notifications') as never)}
       scroll
     >

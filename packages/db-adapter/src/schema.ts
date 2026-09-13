@@ -385,8 +385,127 @@ CREATE TABLE IF NOT EXISTS accuracy_baselines (
 );
 `
 
+/**
+ * Added in v2: dated physique photos with an AI body-fat range. Same shape as
+ * every other estimate in this app — a range and a confidence, never a bare
+ * point number, and never joined against anything else.
+ */
+export const PHYSIQUE_SCHEMA_V2 = `
+CREATE TABLE IF NOT EXISTS physique_entries (
+  id                   INTEGER PRIMARY KEY,
+  local_date           TEXT NOT NULL,
+  photo_uri            TEXT NOT NULL,
+  body_fat_pct_low     REAL,
+  body_fat_pct_high    REAL,
+  body_fat_pct_estimate REAL,
+  confidence           TEXT,
+  caveats_json         TEXT,
+  provider             TEXT,
+  model                TEXT,
+  logged_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_physique_date ON physique_entries(local_date);
+`
+
+/**
+ * Added in v3: reusable strength-training splits. A split is a named day
+ * ("Upper", "Push") holding a repeatable list of exercises, each with the
+ * weight and rep count the user actually trains — filled in once, then reused
+ * every time that day comes back around instead of re-typing the whole
+ * session.
+ */
+export const WORKOUT_SPLITS_SCHEMA_V3 = `
+CREATE TABLE IF NOT EXISTS workout_splits (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workout_split_exercises (
+  id         INTEGER PRIMARY KEY,
+  split_id   INTEGER NOT NULL REFERENCES workout_splits(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  sets       INTEGER NOT NULL DEFAULT 3,
+  reps       INTEGER NOT NULL DEFAULT 10,
+  weight_lb  REAL,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_split_exercises_split ON workout_split_exercises(split_id);
+`
+
+/**
+ * Added in v4: whole-food / animal-based classification, snapshotted onto
+ * each log_item at log time from the corpus row it matched (USDA's own
+ * category taxonomy — see tools/nutrition-data/src/build.mjs). Same
+ * invariant as every other snap_* column: copied in once, never re-derived
+ * live, so a later corpus rebuild can never quietly change what a past day's
+ * Health Score was. NULL means "unknown" (an AI-estimate row with no corpus
+ * match) — the health-score formula treats that as neutral, never a penalty.
+ */
+export const FOOD_CLASSIFICATION_SCHEMA_V4 = `
+ALTER TABLE log_items ADD COLUMN is_whole_food INTEGER;
+ALTER TABLE log_items ADD COLUMN is_animal_based INTEGER;
+`
+
+/**
+ * Added in v5: the per-exercise breakdown behind a logged workout — same
+ * name/sets/reps/weight shape as workout_split_exercises, but attached to a
+ * logged `exercise_entries` row instead of a reusable template, and editable
+ * after the fact the same way a meal's log_items are. A workout logged from a
+ * plain Run/Manual/Describe entry has no rows here — there is no "sets" to
+ * break down for those, so the edit screen falls back to name + calories.
+ */
+export const EXERCISE_ENTRY_ITEMS_SCHEMA_V5 = `
+CREATE TABLE IF NOT EXISTS exercise_entry_items (
+  id                 INTEGER PRIMARY KEY,
+  exercise_entry_id  INTEGER NOT NULL REFERENCES exercise_entries(id) ON DELETE CASCADE,
+  name               TEXT NOT NULL,
+  sets               INTEGER NOT NULL DEFAULT 3,
+  reps               INTEGER NOT NULL DEFAULT 10,
+  weight_lb          REAL,
+  sort_order         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_exercise_entry_items_entry ON exercise_entry_items(exercise_entry_id);
+`
+
+/**
+ * Added in v6: scheduled meals. A `planned_meals` row earmarks a saved meal
+ * for a future day — either a specific `local_date` (one-off) or a `weekday`
+ * (0=Sunday..6=Saturday, recurring every week) — never both, per the CHECK
+ * below. There is no push-notification path in this app, so "auto-log" means
+ * the plan is realized into a real `meals` row the next time that date's data
+ * is read (see `materializePlannedMeals` in repo.ts): by the time the user
+ * opens that day, the meal is already sitting in the log, exactly as if it
+ * had been logged by hand that morning.
+ *
+ * `planned_meal_log` is the dedupe ledger — one row per (plan, date) that has
+ * already fired — so materializing is safe to call on every read without
+ * risking a duplicate log if a recurring Monday plan is viewed twice.
+ */
+export const SCHEDULED_MEALS_SCHEMA_V6 = `
+CREATE TABLE IF NOT EXISTS planned_meals (
+  id             INTEGER PRIMARY KEY,
+  saved_meal_id  INTEGER NOT NULL REFERENCES saved_meals(id) ON DELETE CASCADE,
+  meal_slot      TEXT,
+  local_date     TEXT,
+  weekday        INTEGER,
+  created_at     INTEGER NOT NULL,
+  CHECK ((local_date IS NOT NULL AND weekday IS NULL) OR (local_date IS NULL AND weekday IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_planned_meals_date ON planned_meals(local_date);
+CREATE INDEX IF NOT EXISTS idx_planned_meals_weekday ON planned_meals(weekday);
+
+CREATE TABLE IF NOT EXISTS planned_meal_log (
+  planned_meal_id INTEGER NOT NULL REFERENCES planned_meals(id) ON DELETE CASCADE,
+  local_date      TEXT NOT NULL,
+  meal_id         INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+  PRIMARY KEY (planned_meal_id, local_date)
+);
+`
+
 /** Current user-schema version. Bump with every migration added below. */
-export const USER_SCHEMA_VERSION = 1
+export const USER_SCHEMA_VERSION = 6
 
 export interface Migration {
   version: number
@@ -400,4 +519,11 @@ export interface Migration {
  * Migration tests run forward from EVERY shipped version, because a user who
  * skipped three releases must land in the same place as one who took all of them.
  */
-export const MIGRATIONS: readonly Migration[] = [{ version: 1, sql: USER_SCHEMA }]
+export const MIGRATIONS: readonly Migration[] = [
+  { version: 1, sql: USER_SCHEMA },
+  { version: 2, sql: PHYSIQUE_SCHEMA_V2 },
+  { version: 3, sql: WORKOUT_SPLITS_SCHEMA_V3 },
+  { version: 4, sql: FOOD_CLASSIFICATION_SCHEMA_V4 },
+  { version: 5, sql: EXERCISE_ENTRY_ITEMS_SCHEMA_V5 },
+  { version: 6, sql: SCHEDULED_MEALS_SCHEMA_V6 },
+]

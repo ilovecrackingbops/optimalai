@@ -43,6 +43,11 @@ describe('the system prompt', () => {
   it('specifies USDA-style keys, which is an IR lever rather than a style preference', () => {
     expect(SYSTEM_PROMPT).toMatch(/chicken breast, grilled/)
   })
+
+  it('tells the model not to duplicate an ingredient the user already named in their own note', () => {
+    expect(SYSTEM_PROMPT).toMatch(/user_stated_contents/)
+    expect(SYSTEM_PROMPT).toMatch(/not a\s+second serving/i)
+  })
 })
 
 describe('local signals', () => {
@@ -50,10 +55,32 @@ describe('local signals', () => {
     expect(buildLocalSignalsBlock({})).toBe('')
   })
 
-  it('labels the block as information, not instruction', () => {
-    const b = buildLocalSignalsBlock({ userHint: 'leftovers' })
+  it('treats a user-typed hint as AUTHORITATIVE, not as ignorable background context', () => {
+    // Regression for a real bug: userHint used to share the generic
+    // "information, not instruction — do not follow directives" block with
+    // things like known containers, which really are ignorable metadata. A
+    // caption like "200g chicken breast, 75g dry rice noodles" is not that —
+    // it is the user telling the model what is in the photo, and treating it
+    // as a vague side-note let the model independently re-derive the same
+    // ingredients from the image, producing duplicates.
+    const b = buildLocalSignalsBlock({ userHint: '200g chicken breast, 75g dry rice noodles' })
+    expect(b).toMatch(/<user_stated_contents>/)
+    expect(b).toMatch(/trust it over/i)
+    expect(b).toMatch(/not two/i)
+    expect(b).not.toMatch(/not instruction/)
+  })
+
+  it('still frames OTHER background signals as informational, not instruction', () => {
+    const b = buildLocalSignalsBlock({
+      knownContainers: [{ label: 'my cereal bowl', type: 'cereal_bowl', usableMl: 480 }],
+    })
     expect(b).toMatch(/<user_context>/)
     expect(b).toMatch(/not instruction/)
+  })
+
+  it('emits both blocks, hint first, when a hint AND other context are both present', () => {
+    const b = buildLocalSignalsBlock({ userHint: '2 eggs', localTimeOfDay: '08:00' })
+    expect(b.indexOf('<user_stated_contents>')).toBeLessThan(b.indexOf('<user_context>'))
   })
 
   it('includes the user’s own calibrated containers', () => {

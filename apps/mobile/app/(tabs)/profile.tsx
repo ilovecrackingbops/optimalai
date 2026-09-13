@@ -6,7 +6,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { ProviderId } from '@nutai/prompt'
 import { availability, requestPermissions } from '../../src/health/healthkit'
 import { exportAndShareBackup, finishRestore, importBackup, pickBackupFile } from '../../src/data/backup'
-import { currentGoal, resetEverything, setting, type CurrentGoal } from '../../src/data/repo'
+import type { MacroSplitPct } from '@nutai/goals'
+import {
+  currentGoal,
+  macroSplitPct,
+  putSetting,
+  resetEverything,
+  setting,
+  weightHistory,
+  type CurrentGoal,
+} from '../../src/data/repo'
+import { formatRatePerWeek, formatWeightKg, getUnitPref, setUnitPref, type UnitPref } from '../../src/data/units'
 import { loadCredential, maskCredential } from '../../src/inference/credentials'
 import { PROVIDER_NAME } from '../../src/components/CredentialForm'
 import { Icon } from '../../src/components/Icon'
@@ -37,20 +47,40 @@ export default function Profile() {
   const [diet, setDiet] = useState('')
   const [providerLabel, setProviderLabel] = useState('—')
   const [dataBusy, setDataBusy] = useState(false)
+  const [unitPref, setUnitPrefState] = useState<UnitPref>('imperial')
+  const [latestWeightKg, setLatestWeightKg] = useState<number | null>(null)
+  const [targetWeightKg, setTargetWeightKg] = useState<number | null>(null)
+  const [rateLbPerWeek, setRateLbPerWeek] = useState<number | null>(null)
+  const [stepGoal, setStepGoal] = useState(10_000)
+  const [macroSplit, setMacroSplit] = useState<MacroSplitPct | null>(null)
 
   useFocusEffect(
     useCallback(() => {
       let alive = true
       void (async () => {
-        const [g, avail, d, p] = await Promise.all([
+        const [g, avail, d, p, units, weights, stepGoalStr, desiredWeightStr, rateStr, split] = await Promise.all([
           currentGoal(),
           availability(),
           setting('diet.style', 'balanced'),
           setting('provider'),
+          getUnitPref(),
+          weightHistory(),
+          setting('stepGoal', '10000'),
+          setting('goal.desiredWeightKg', ''),
+          setting('goal.rateLbPerWeek', ''),
+          macroSplitPct(),
         ])
         if (!alive) return
         setGoal(g)
+        setMacroSplit(split)
         setDiet(d)
+        setUnitPrefState(units)
+        setLatestWeightKg(weights[weights.length - 1]?.weightKg ?? null)
+        setStepGoal(Number(stepGoalStr) || 10_000)
+        const desiredKg = Number.parseFloat(desiredWeightStr)
+        setTargetWeightKg(Number.isFinite(desiredKg) && desiredKg > 0 ? desiredKg : null)
+        const rate = Number.parseFloat(rateStr)
+        setRateLbPerWeek(Number.isFinite(rate) && rate > 0 ? rate : null)
         setHealthAvail(avail === 'available' ? 'available' : avail === 'not-ios' ? 'not-ios' : 'unavailable')
         if (!p || p === 'none') {
           setProviderLabel('Not connected')
@@ -69,6 +99,28 @@ export default function Profile() {
       }
     }, []),
   )
+
+  function toggleUnits(pref: UnitPref) {
+    setUnitPrefState(pref)
+    void setUnitPref(pref)
+  }
+
+  function editStepGoal() {
+    Alert.prompt(
+      'Daily step goal',
+      'Replaces the fixed 10,000 — set whatever number actually fits your day.',
+      (text) => {
+        if (text == null) return
+        const n = Number.parseInt(text, 10)
+        if (!Number.isFinite(n) || n <= 0) return
+        setStepGoal(n)
+        void putSetting('stepGoal', String(n))
+      },
+      'plain-text',
+      String(stepGoal),
+      'number-pad',
+    )
+  }
 
   function connectHealth() {
     if (healthBusy) return
@@ -110,7 +162,7 @@ export default function Profile() {
       const picked = await pickBackupFile()
       if (!picked.ok) {
         if (picked.reason !== 'cancelled') {
-          Alert.alert('Not a backup', "That doesn't look like a Nut AI backup file.")
+          Alert.alert('Not a backup', "That doesn't look like an Optimal AI backup file.")
         }
         return
       }
@@ -128,7 +180,7 @@ export default function Profile() {
                 try {
                   const outcome = await importBackup(picked.payload)
                   if (!outcome.ok) {
-                    Alert.alert('Cannot restore', 'This backup is from a newer version of Nut AI — update the app first.')
+                    Alert.alert('Cannot restore', 'This backup is from a newer version of Optimal AI — update the app first.')
                     return
                   }
                   await finishRestore()
@@ -175,12 +227,55 @@ export default function Profile() {
           value={goal ? `${Math.round(goal.protein_g)} / ${Math.round(goal.carbs_g)} / ${Math.round(goal.fat_g)} g` : '—'}
           onPress={() => router.push('/edit-goals' as never)}
         />
-        <Row label="Log weight" value="" onPress={() => router.push('/log-weight' as never)} />
+        <Row
+          label="Macro ratio"
+          value={macroSplit ? `${Math.round(macroSplit.proteinPct)}/${Math.round(macroSplit.fatPct)}/${Math.round(100 - macroSplit.proteinPct - macroSplit.fatPct)} %` : 'Automatic'}
+          onPress={() => router.push('/edit-macro-ratio' as never)}
+        />
+        <Row
+          label="Log weight"
+          value={latestWeightKg != null ? formatWeightKg(latestWeightKg, unitPref) : ''}
+          onPress={() => router.push('/log-weight' as never)}
+        />
+        <Row
+          label="Target weight"
+          value={
+            targetWeightKg != null
+              ? `${formatWeightKg(targetWeightKg, unitPref)}${goal && goal.goalType !== 'maintain' && rateLbPerWeek != null ? ` · ${goal.goalType === 'gain' ? 'gain' : 'lose'} ${formatRatePerWeek(rateLbPerWeek, unitPref)}` : ''}`
+              : 'Not set'
+          }
+          onPress={() => router.push('/edit-target-weight' as never)}
+        />
         <Row label="Diet style" value={diet} />
         <Row
           label="Adaptive target"
           value={goal ? (goal.adaptive ? 'On' : 'Off — set by hand') : '—'}
         />
+        <Row label="Step goal" value={stepGoal.toLocaleString()} onPress={editStepGoal} />
+      </Section>
+
+      <Section title="Units">
+        <View style={[styles.segment, { backgroundColor: theme.bgElevated }]}>
+          <Pressable
+            onPress={() => toggleUnits('imperial')}
+            style={[styles.segItem, unitPref === 'imperial' && { backgroundColor: theme.bg }]}
+          >
+            <Text style={[type.body, { color: unitPref === 'imperial' ? theme.text : theme.textMuted }]}>
+              lbs
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => toggleUnits('metric')}
+            style={[styles.segItem, unitPref === 'metric' && { backgroundColor: theme.bg }]}
+          >
+            <Text style={[type.body, { color: unitPref === 'metric' ? theme.text : theme.textMuted }]}>
+              kg
+            </Text>
+          </Pressable>
+        </View>
+        <Text style={[type.caption, { color: theme.textFaint, paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: space.md, lineHeight: 18 }]}>
+          Applies everywhere a weight is shown — logging, trends, and body composition.
+        </Text>
       </Section>
 
       <Section title="AI provider">
@@ -259,7 +354,7 @@ export default function Profile() {
       </Section>
 
       <Text style={[type.caption, { color: theme.textFaint, marginTop: space.xl, lineHeight: 19 }]}>
-        Nut AI's estimates are AI-generated approximations and may not be accurate. It is not a
+        Optimal AI's estimates are AI-generated approximations and may not be accurate. It is not a
         medical device and does not diagnose, treat, cure or prevent any condition. Consult a
         registered dietitian or healthcare provider before making medical decisions.
       </Text>
@@ -312,6 +407,8 @@ function Line({ label, value }: { label: string; value: string }) {
 const styles = StyleSheet.create({
   hero: { marginTop: space.lg, padding: space.lg, borderRadius: radius.xl },
   group: { borderRadius: radius.xl, overflow: 'hidden' },
+  segment: { flexDirection: 'row', borderRadius: radius.pill, padding: 3, margin: space.lg, marginBottom: 0 },
+  segItem: { flex: 1, alignItems: 'center', paddingVertical: space.sm, borderRadius: radius.pill },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -22,7 +22,7 @@ export default function ThanksScreen() {
 
         <Text style={[styles.heading, { color: theme.text }]}>Thank you for trusting us!</Text>
         <Text style={[type.body, { color: theme.textMuted, textAlign: 'center', marginTop: space.md }]}>
-          Now let's personalize Nut AI for you...
+          Now let's personalize Optimal AI for you...
         </Text>
 
         <View style={[styles.card, { backgroundColor: theme.bgSunken }]}>

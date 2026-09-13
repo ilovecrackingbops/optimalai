@@ -1,8 +1,11 @@
-import { router } from 'expo-router'
-import { useState } from 'react'
+import { router, useLocalSearchParams } from 'expo-router'
+import { useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,7 +19,9 @@ import type { WebLookupResult } from '@nutai/core-schema'
 import { healthScore } from '@nutai/totals'
 import { ConfidenceChip, ConfidenceReasons } from '../src/components/ConfidenceChip'
 import { Icon, type IconName } from '../src/components/Icon'
-import { logMeal } from '../src/data/repo'
+import { openNutritionDb } from '../src/db/expo-adapter'
+import { atDate, logMeal } from '../src/data/repo'
+import { aggregateAdherence, fetchClassifications, type AdherenceShares, type FoodClassification } from '../src/data/food-category'
 import { fixScan, lookupOther, retryScan } from '../src/scan/orchestrator'
 import {
   answerQuestion,
@@ -46,11 +51,44 @@ import { MIN_TAP_TARGET, radius, space, type } from '../src/theme/tokens'
 export default function Result() {
   const theme = useTheme()
   const insets = useSafeAreaInsets()
+  // Set when this scan started from Home's "Log meal" sheet for a day other
+  // than today — the meal logs to THAT date instead of the moment "Log it" is
+  // tapped, which can be well after the scan for a photo/text log started.
+  const { forDate } = useLocalSearchParams<{ forDate?: string }>()
   const phase = useScan()
   const [expandedBand, setExpandedBand] = useState(false)
   const [logging, setLogging] = useState(false)
   const [fixOpen, setFixOpen] = useState(false)
   const [fixText, setFixText] = useState('')
+  const [classifications, setClassifications] = useState<Map<string, FoodClassification>>(new Map())
+
+  // Keyed on which FOODS are in the meal, not the whole phase object — editing
+  // a gram amount fires this effect's dependency on every keystroke otherwise,
+  // and the classification of a food (a DB round trip) doesn't change just
+  // because its quantity did. The kcal-weighted share itself is recomputed
+  // below on every render instead, from this cached classification map — pure
+  // and synchronous, no DB call needed as the user types.
+  const ingredientKey =
+    phase.kind === 'ready' ? phase.result.meal.ingredients.map((r) => r.sourceFoodId ?? '').join(',') : ''
+
+  // A live corpus lookup, not a snapshot — nothing here is written yet, so
+  // there is no historical number at risk of drifting later.
+  useEffect(() => {
+    if (phase.kind !== 'ready') return
+    let alive = true
+    void (async () => {
+      const nutritionDb = await openNutritionDb()
+      const cls = await fetchClassifications(nutritionDb, phase.result.meal.ingredients.map((r) => r.sourceFoodId))
+      if (alive) setClassifications(cls)
+    })()
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ingredientKey])
+
+  const adherence: AdherenceShares | undefined =
+    phase.kind === 'ready' ? aggregateAdherence(phase.result.meal.ingredients, classifications) : undefined
 
   if (phase.kind === 'analyzing' || phase.kind === 'captured') {
     const stage = phase.kind === 'analyzing' ? phase.stage : 'preparing'
@@ -121,7 +159,19 @@ export default function Result() {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingTop: insets.top + space.lg, paddingBottom: 120 }}>
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ padding: space.lg, paddingTop: insets.top + space.lg, paddingBottom: 120 }}
+      >
+        {forDate ? (
+          <View style={[styles.forDateBanner, { backgroundColor: theme.bgSunken }]}>
+            <Icon name="calendar" size={16} color={theme.protein} />
+            <Text style={[type.label, { color: theme.protein }]}>
+              Logging for {new Date(atDate(forDate)).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}, not today
+            </Text>
+          </View>
+        ) : null}
+
         <Text style={[type.title, { color: theme.text }]}>
           {result.items[0]?.row.displayName ?? 'Your meal'}
         </Text>
@@ -145,6 +195,7 @@ export default function Result() {
         <StatsPager
           totals={result.totals}
           grams={result.meal.ingredients.reduce((a, r) => a + r.grams, 0)}
+          adherence={adherence}
         />
 
         {/* Highlighted questions: at most two, ever. */}
@@ -189,6 +240,9 @@ export default function Result() {
               <View style={[styles.row, { borderColor: theme.border }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[type.body, { color: theme.text }]}>{row.displayName}</Text>
+                  <Text style={[type.caption, { color: theme.textMuted, marginTop: 2 }]}>
+                    {Math.round((row.nutrientSnapshot.kcal * row.grams) / 100)} kcal
+                  </Text>
                   {row.origin === 'web_lookup' && row.sourceUrl ? (
                     <Text style={[type.micro, { color: theme.textMuted, marginTop: 2 }]}>
                       From {domainOf(row.sourceUrl)}
@@ -243,7 +297,7 @@ export default function Result() {
               setLogging(true)
               void (async () => {
                 try {
-                  await logMeal(result, phase.meta, phase.photoUri, Date.now())
+                  await logMeal(result, phase.meta, phase.photoUri, forDate ? atDate(forDate) : Date.now())
                   reset()
                   router.dismissAll()
                 } catch {
@@ -259,7 +313,10 @@ export default function Result() {
       </View>
 
       {fixOpen ? (
-        <View style={[styles.fixOverlay, { backgroundColor: theme.bg, paddingTop: insets.top + space.xl }]}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[styles.fixOverlay, { backgroundColor: theme.bg, paddingTop: insets.top + space.xl }]}
+        >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
             <Icon name="pencil" size={20} color={theme.text} />
             <Text style={[type.title, { color: theme.text }]}>Fix result</Text>
@@ -284,6 +341,11 @@ export default function Result() {
             accessibilityRole="button"
             disabled={!fixText.trim()}
             onPress={() => {
+              // Dismiss BEFORE closing the overlay — closing it first left the
+              // keyboard stuck on screen with nothing focused to blur, and the
+              // only way off the frozen screen was a swipe-down that dismissed
+              // this whole modal (and everything logged in it) instead.
+              Keyboard.dismiss()
               const note = fixText.trim()
               setFixOpen(false)
               setFixText('')
@@ -298,13 +360,16 @@ export default function Result() {
             <Text style={[type.bodyStrong, { color: theme.bg }]}>Update</Text>
           </Pressable>
           <Pressable
-            onPress={() => setFixOpen(false)}
+            onPress={() => {
+              Keyboard.dismiss()
+              setFixOpen(false)
+            }}
             hitSlop={space.md}
             style={{ alignSelf: 'center', marginBottom: Math.max(insets.bottom, space.lg) }}
           >
             <Text style={[type.body, { color: theme.textMuted }]}>Cancel</Text>
           </Pressable>
-        </View>
+        </KeyboardAvoidingView>
       ) : null}
     </View>
   )
@@ -441,13 +506,19 @@ function Macro({
  * fiber/sugar/sodium with the health score. The score is arithmetic from
  * @nutai/totals — tap it and every point shows its named rule.
  */
-function StatsPager({ totals, grams }: { totals: Parameters<typeof healthScore>[0]; grams: number }) {
+function StatsPager({
+  totals, grams, adherence,
+}: {
+  totals: Parameters<typeof healthScore>[0]
+  grams: number
+  adherence: AdherenceShares | undefined
+}) {
   const theme = useTheme()
   const { width } = useWindowDimensions()
   const pageW = width - space.lg * 2
   const [page, setPage] = useState(0)
   const [showWhy, setShowWhy] = useState(false)
-  const hs = healthScore(totals, grams > 0 ? grams : undefined)
+  const hs = healthScore(totals, grams > 0 ? grams : undefined, adherence)
 
   return (
     <View style={{ marginTop: space.xl }}>
@@ -518,6 +589,14 @@ function StatsPager({ totals, grams }: { totals: Parameters<typeof healthScore>[
 
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl },
+  forDateBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    padding: space.md,
+    borderRadius: radius.md,
+    marginBottom: space.lg,
+  },
   statsPage: { flexDirection: 'row', gap: space.md },
   dots: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: space.md },
   dot: { width: 6, height: 6, borderRadius: 3 },

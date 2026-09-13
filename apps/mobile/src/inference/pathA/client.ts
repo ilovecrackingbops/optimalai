@@ -4,11 +4,14 @@ import {
   buildExerciseEstimateInstruction,
   buildLabelScanRequest,
   buildOpenAIRequest,
+  buildPhysiqueEstimateRequest,
   buildReceiptScanRequest,
+  buildTextFoodLogInstruction,
   buildTextJsonRequest,
   buildWebLookupRequest,
   computeScanCost,
   EXERCISE_ESTIMATE_PROMPT_VERSION,
+  TEXT_FOOD_LOG_PROMPT_VERSION,
   type ProviderId,
 } from '@nutai/prompt'
 
@@ -265,6 +268,64 @@ export async function runExerciseEstimate(
     EXERCISE_ESTIMATE_PROMPT_VERSION,
   )
   return postVisionJson(provider, built, fetchImpl, timeoutMs)
+}
+
+/**
+ * Visual body-fat estimate: one image in, one PhysiqueEstimate-shaped JSON out.
+ * Same transport as the label scanner, different instruction and validator.
+ */
+export async function runPhysiqueEstimate(
+  provider: ProviderId,
+  input: { model: string; imageBase64: string },
+  credential: Credential,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<WebLookupOutcome> {
+  return postVisionJson(provider, buildPhysiqueEstimateRequest(provider, input, credential), fetchImpl, timeoutMs)
+}
+
+/**
+ * Text-only food logging — no photo. Produces the SAME VisionPayload JSON shape
+ * a photo scan does, so the caller can run it through the identical downstream
+ * pipeline (gram-engine, resolver, confidence bands). A meal description can run
+ * several items long, so this gets a larger token budget than the other
+ * text-only call (exercise estimates).
+ *
+ * Passing `jsonSchema` (the same VISION_WIRE_SCHEMA the photo path uses, see
+ * orchestrator.ts's `wireSchemaFor`) turns on provider structured-output mode
+ * instead of bare `json_object`. This is the fix for providers being
+ * inconsistent at following the prompt's field-by-field contract on their
+ * own — a real report: "4 raw eggs and 10g of liver" via OpenAI came back in
+ * a shape the client rejected outright, while Anthropic handled the identical
+ * description fine. Structured-output mode makes the PROVIDER respect the
+ * shape instead of leaning entirely on prompt-following. Mirrors
+ * `runScanWithFallback`'s structural-400 safety net: a provider that rejects
+ * the schema dialect gets one retry with no schema at all, never billed
+ * twice for the same request.
+ */
+export async function runTextFoodScan(
+  provider: ProviderId,
+  input: { model: string; description: string; jsonSchema?: unknown },
+  credential: Credential,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 30_000,
+): Promise<WebLookupOutcome & { usedSchemaFallback?: boolean }> {
+  const attempt = async (jsonSchema: unknown) => {
+    const built = buildTextJsonRequest(
+      provider,
+      { model: input.model, instruction: buildTextFoodLogInstruction(input.description), maxTokens: 2048, jsonSchema },
+      credential,
+      TEXT_FOOD_LOG_PROMPT_VERSION,
+    )
+    return postVisionJson(provider, built, fetchImpl, timeoutMs)
+  }
+
+  const first = await attempt(input.jsonSchema ?? null)
+  const structural = !first.ok && first.error?.httpStatus === 400 && input.jsonSchema != null
+  if (!structural) return first
+
+  const second = await attempt(null)
+  return second.ok ? { ...second, usedSchemaFallback: true } : first
 }
 
 /** Receipt transcription: same transport, different instruction and validator. */
